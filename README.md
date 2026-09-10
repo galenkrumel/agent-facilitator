@@ -5,16 +5,18 @@ discusses openly. A neutral AI facilitator helps the team surface conflicting
 assumptions — it does not make the decision, recommend an option, or coach
 participants.
 
-> **Implementation status: M0 (Cloudflare-as-code setup).**
-> The deployment path, bindings and `npm` interface are in place. Product
-> behaviour is built in M1–M8; the full documentation required by M8 replaces
-> this file's later sections.
+> **Implementation status: M1 (application spine).**
+> The deployment path is in place (M0), and a decision can now be framed,
+> opened through a participant link, and read from SQLite-backed Durable Object
+> state in the browser. The lifecycle itself — submit, reveal, discussion, the
+> facilitator — is built in M2–M8; the full documentation required by M8
+> replaces this file's later sections.
 
 ## Architecture (as configured)
 
 | Component | Role |
 |---|---|
-| Worker (`src/server/index.ts`) | Thin. Routes Agents SDK traffic; from M1, resolves participant links into sessions. Holds no state. |
+| Worker (`src/server/index.ts`) | Thin. Resolves participant links into sessions, serves the SPA, routes Agents SDK traffic. Holds no state. |
 | `DecisionAgent` (SQLite Durable Object) | Transactional authority for one active decision. |
 | `TeamAgent` (SQLite Durable Object) | Closed decision history only. |
 | `FacilitatorWorkflow` (Workflow) | Durable AI execution: model invocation, retry, output validation. Not a system of record. |
@@ -24,6 +26,41 @@ participants.
 Everything above is declared in `wrangler.jsonc` and provisioned by
 `wrangler deploy`. There are no manual dashboard steps and no REST
 provisioning.
+
+## Framing a decision and opening it
+
+Until the seeded scenario arrives (M7), frame a decision over HTTP. There are
+no accounts, so this is unauthenticated — it only hands back links to the
+decision you just created:
+
+```bash
+curl -X POST http://localhost:5173/d/new \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Ship in February or slip to March?",
+       "context":"Two weeks of runway left.",
+       "options":["Ship in February","Slip to March"],
+       "participants":["Ada","Grace"]}'
+```
+
+It returns one participant link per person — the first is the owner — and the
+application adds the **Other** option itself. The links are shown **once**:
+only their hashes are stored.
+
+Opening a link:
+
+```text
+GET /d/:decisionId/p/:credential   Decision Agent validates the credential,
+                                   mints a session, sets an HttpOnly cookie
+      ↓ 303
+GET /d/:decisionId                 SPA shell; the credential is out of the URL
+      ↓
+WS  /agents/decision-agent/:id     Decision Agent authenticates the cookie,
+                                   then serves getBootstrap() from SQLite
+```
+
+The credential stays reusable: opening the same link again — another browser,
+another device, later — mints another session for the same participant. A
+connection without a valid session is closed, not served.
 
 ## Prerequisites
 
@@ -122,3 +159,9 @@ participant's link can act as that participant.** Links do not expire, are not
 single-use, and work from any browser or device. There are no user accounts and
 **no account recovery.** These credentials are not appropriate for highly
 sensitive information.
+
+What the implementation does do: only SHA-256 hashes of credentials and
+sessions are persisted, so the stored state yields no working links; the
+credential is exchanged once for an `HttpOnly` session cookie and then leaves
+the address bar; and the cookie is scoped per decision, so one browser can hold
+sessions for several decisions — as a different participant in each.

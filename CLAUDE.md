@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Milestones
 
-Work is organised as milestones M0–M8. **M0 (Cloudflare-as-code setup) is the only one complete** — most of `src/` is a deployable stub with a comment naming the milestone that fills it in.
+Work is organised as milestones M0–M8. **M0 (Cloudflare-as-code setup) and M1 (application spine) are complete** — the rest of `src/` is a deployable stub with a comment naming the milestone that fills it in. M2 (Frame → Submit → Reveal) is next.
 
 Before implementing any milestone, read `docs/requirements.md` (what the product must do) and `docs/implementation-plan.md` (how the repo gets there). They are the authority; `README.md` describes only what is built so far.
 
@@ -24,6 +24,8 @@ Before implementing any milestone, read `docs/requirements.md` (what the product
 
 ## Gotchas
 
+- **`tsconfig.json` must stay on `"target": "ES2021"`.** ES2022 turns on `useDefineForClassFields`, which silently breaks the `@callable()` TC39 decorator at runtime. Never set `experimentalDecorators`.
+- **`run_worker_first` globs need a segment to match.** `"/d/*"` does not match `/d`, so a bare `/d` request is served by the asset handler and never reaches the Worker — that is why framing is `POST /d/new`.
 - **Relative imports need the `.ts` extension** (`./agents/decision.ts`) — `verbatimModuleSyntax` + `allowImportingTsExtensions`.
 - **`env.d.ts` is generated and gitignored.** Never hand-edit it. Run `npm run types` after changing any binding in `wrangler.jsonc`.
 - **`npm run dev` requires live Cloudflare credentials.** The `AI` binding is `remote: true` (there is no local Workers AI) and connects eagerly at startup.
