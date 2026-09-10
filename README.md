@@ -19,7 +19,7 @@ participants.
 | `TeamAgent` (SQLite Durable Object) | Closed decision history only. |
 | `FacilitatorWorkflow` (Workflow) | Durable AI execution: model invocation, retry, output validation. Not a system of record. |
 | Workers AI (`AI` binding) | Model runtime. The specific model is chosen in M4, after the required model evaluation. |
-| Static assets | React client, SPA fallback. |
+| Static assets | React 19 client (Vite, Tailwind CSS v4), SPA fallback. |
 
 Everything above is declared in `wrangler.jsonc` and provisioned by
 `wrangler deploy`. There are no manual dashboard steps and no REST
