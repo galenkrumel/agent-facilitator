@@ -5,5 +5,6 @@ dist/
 !.env.example
 env.d.ts
 .wrangler/
+.claude/worktrees/
 .DS_Store
 *.tsbuildinfo
