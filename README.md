@@ -66,22 +66,35 @@ filtering and a TTL are optional and safe to add.
 | Workers Tail → Read | Only for `wrangler tail` live logs. Add later if you want them. |
 | Workers Observability | No such permission group exists. `observability.enabled` is Worker configuration, applied under Workers Scripts: Edit. |
 
-### Still to confirm on the first real deploy
+### Verified against a live deploy
 
-This set is derived from Cloudflare's documentation, not yet from a live deploy
-of this project (M0 was implemented without credentials). Two things to watch:
+A single **Account API Token** on one account deployed the whole stack in one
+`npm run setup`: Worker, static assets, **both SQLite Durable Objects including
+the `new_sqlite_classes` migration**, the **Workflow** (`facilitator-workflow`,
+provisioned automatically), the Workers AI binding, and `observability.enabled`.
 
-1. If Workers AI inference returns 403 in M4, raise Workers AI from **Read** to
-   **Edit** — the REST API docs are inconsistent about which is required.
-2. If `wrangler deploy` fails on the Durable Object migration or the Workflow,
-   that would mean those resources need a scope beyond Workers Scripts: Edit,
-   which the documentation does not indicate. Report it if so.
+This confirms the key finding: **Durable Objects, Workflows and observability
+need no permission of their own.** They are provisioned entirely under
+Workers Scripts: Edit. No dashboard step was required for any resource.
+
+`wrangler whoami` also succeeded, so the token carries Account Settings: Read.
+
+Still unproven: whether Workers AI **Read** is enough to *run inference*, as
+opposed to merely attaching the binding at deploy time. The binding attached
+fine, but no model has been invoked yet. If inference 403s in M4, raise it to
+**Edit**.
 
 ## Local development
 
 ```bash
 npm run dev
 ```
+
+`.env` holds Cloudflare **CLI credentials only.** Wrangler would otherwise also
+load `.env` into the *Worker's* `env` — writing the API token into
+`dist/.../.dev.vars` and typing it into `Env`. `wrangler.jsonc` declares
+`"secrets": { "required": [] }` to stop that. Add a name to that array if the
+Worker ever genuinely needs a secret.
 
 Local dev **also requires Cloudflare credentials.** There is no local Workers AI
 emulator, so the `AI` binding is declared `remote: true` and Miniflare proxies

@@ -44,5 +44,10 @@
     }
   ],
 
+  // This Worker requires no secrets. Declaring that explicitly stops Wrangler
+  // from loading .env into the Worker's env — .env here holds only Cloudflare
+  // CLI credentials, which must never become Worker bindings.
+  "secrets": { "required": [] },
+
   "observability": { "enabled": true }
 }
