@@ -1,0 +1,48 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "async-decision-facilitator",
+  "main": "src/server/index.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Workers AI. The facilitator model itself is selected in M4, after the
+  // model evaluation required by the requirements.
+  "ai": { "binding": "AI", "remote": true },
+
+  // Static assets. `run_worker_first` keeps Worker-owned routes from being
+  // swallowed by the SPA fallback:
+  //   /agents/* — Agents SDK RPC + realtime transport
+  //   /d/*      — participant links (/d/:decisionId/p/:credential), M1
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/d/*"]
+  },
+
+  // Both agents are SQLite-backed Durable Objects. The Decision Agent is the
+  // transactional authority for active decision state; the Team Agent owns
+  // closed decision history.
+  "durable_objects": {
+    "bindings": [
+      { "name": "DecisionAgent", "class_name": "DecisionAgent" },
+      { "name": "TeamAgent", "class_name": "TeamAgent" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["DecisionAgent", "TeamAgent"]
+    }
+  ],
+
+  // Durable AI execution across execution boundaries. Provisioned by
+  // `wrangler deploy`; no dashboard step.
+  "workflows": [
+    {
+      "name": "facilitator-workflow",
+      "binding": "FACILITATOR_WORKFLOW",
+      "class_name": "FacilitatorWorkflow"
+    }
+  ],
+
+  "observability": { "enabled": true }
+}
