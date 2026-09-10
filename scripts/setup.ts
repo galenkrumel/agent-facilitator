@@ -25,7 +25,7 @@ export function parseDeployedUrl(output: string): string | undefined {
   return output.match(/https:\/\/[^\s"']+\.workers\.dev/)?.[0];
 }
 
-function run(label: string, command: string, args: string[], capture = false) {
+function run(label: string, command: string, args: string[], capture = false, hint?: string) {
   console.log(`\n▸ ${label}`);
   const result = spawnSync(command, args, {
     stdio: capture ? ["inherit", "pipe", "inherit"] : "inherit",
@@ -33,6 +33,7 @@ function run(label: string, command: string, args: string[], capture = false) {
   });
   if (result.status !== 0) {
     console.error(`\n✗ ${label} failed (exit ${result.status ?? "signal"}).`);
+    if (hint) console.error(hint);
     process.exit(result.status ?? 1);
   }
   const stdout = result.stdout?.toString() ?? "";
@@ -54,8 +55,19 @@ function main() {
   }
 
   // 2. Cloudflare authentication — via Wrangler, so a bad token fails here with a
-  //    clear message rather than midway through a deploy.
-  run("Validating Cloudflare credentials", "npx", ["wrangler", "whoami"]);
+  //    clear message rather than midway through a deploy. Note that `whoami`
+  //    needs Account Settings: Read to list accounts, which a deploy-only token
+  //    might omit, so name that scope rather than just reporting an exit code.
+  run(
+    "Validating Cloudflare credentials",
+    "npx",
+    ["wrangler", "whoami"],
+    false,
+    "  The token may be invalid, or may be missing a scope `whoami` itself needs:\n" +
+      "    • Account → Account Settings → Read  (required to list your accounts)\n" +
+      "    • User → User Details → Read         (only to display your email)\n" +
+      "  See README (\"Cloudflare API token permissions\")."
+  );
 
   // 3–5. Types, build, deploy.
   run("Generating Worker types", "npx", ["wrangler", "types", "env.d.ts"]);

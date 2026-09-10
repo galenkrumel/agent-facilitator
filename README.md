@@ -45,20 +45,37 @@ URL.
 
 ## Cloudflare API token permissions
 
-> **Not yet empirically verified.** M0 was implemented without live Cloudflare
-> credentials, so the deployment chain was validated up to
-> `wrangler deploy --dry-run`. The minimum permission set below is the
-> best-known requirement and must be confirmed against a real deploy, then
-> narrowed to the actual minimum.
+Create the token at **My Profile → API Tokens → Create Token**. Start from the
+**Edit Cloudflare Workers** template, then adjust to the three scopes below.
 
-Create the token from the **Edit Cloudflare Workers** template, then add
-Workers AI:
-
-| Scope | Permission | Needed for |
+| Scope | Permission | Why this project needs it |
 |---|---|---|
-| Account → Workers Scripts | Edit | Worker upload, Durable Object namespaces, Workflows, static assets |
-| Account → Workers AI | Read | The `AI` binding, including the remote binding used by `npm run dev` |
-| Account → Account Settings | Read | `wrangler whoami` credential validation |
+| Account → Workers Scripts | **Edit** | Uploading the Worker. Also covers **Durable Objects, the SQLite migration, Workflows, static assets and the observability setting** — none of those have a permission group of their own; they are all managed through the Workers Scripts API. |
+| Account → Account Settings | **Read** | `wrangler whoami`, which `npm run setup` uses to validate credentials, needs this to list accounts. Cloudflare's own auto-generated Workers deploy token includes it. |
+| Account → Workers AI | **Read** | The `AI` binding. Needed by `npm run dev` (the binding is remote) and by facilitator inference from M4. Every `/accounts/{id}/ai/*` endpoint requires it. |
+
+Set **Account Resources** to the single account you are deploying to. Client IP
+filtering and a TTL are optional and safe to add.
+
+### Deliberately excluded
+
+| Scope | Why not |
+|---|---|
+| Workers KV Storage → Edit | Ships with the *Edit Cloudflare Workers* template, but this project uses no KV. Remove it. |
+| User → User Details → Read | Only lets `wrangler whoami` print your email address; without it Wrangler warns but authentication still works. Add it if `npm run setup` fails at the credential check. |
+| Workers Tail → Read | Only for `wrangler tail` live logs. Add later if you want them. |
+| Workers Observability | No such permission group exists. `observability.enabled` is Worker configuration, applied under Workers Scripts: Edit. |
+
+### Still to confirm on the first real deploy
+
+This set is derived from Cloudflare's documentation, not yet from a live deploy
+of this project (M0 was implemented without credentials). Two things to watch:
+
+1. If Workers AI inference returns 403 in M4, raise Workers AI from **Read** to
+   **Edit** — the REST API docs are inconsistent about which is required.
+2. If `wrangler deploy` fails on the Durable Object migration or the Workflow,
+   that would mean those resources need a scope beyond Workers Scripts: Edit,
+   which the documentation does not indicate. Report it if so.
 
 ## Local development
 
