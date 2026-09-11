@@ -1,5 +1,5 @@
 # Async Decision Facilitator
-## Repo-Level Implementation Plan — Revision 1.3
+## Repo-Level Implementation Plan — Revision 1.4
 
 ## Revision History
 
@@ -9,6 +9,7 @@
 | **1.1** | Incorporated M1 findings; clarified decision creation, persisted lifecycle states, owner credential model, session persistence, and explicitly rejected a public `/d/new` product endpoint |
 | **1.2** | Added minimum Workers-runtime integration testing to M2 so transactionality, Durable Object serialization, race determinism, and post-commit Workflow scheduling can be directly proven |
 | **1.3** | Explicitly assigned the minimum submission/owner UI to M2. M2 now delivers the Submit → Reveal experience end-to-end in the browser; M3 owns the discussion UI and realtime discussion experience |
+| **1.4** | Incorporated M2 implementation findings: `/d/new` is development-only and eliminated from production bundles; absence of a `current_positions` row represents no current position; revealed initial submissions are exposed through bootstrap after Reveal; Workers-runtime and transport-level verification are complete; M3 owns realtime and M8 owns visual/E2E verification |
 
 ---
 
@@ -193,12 +194,6 @@ The agent should:
 
 The agent may resolve locally when the change does not materially affect requirements or architecture.
 
-Example:
-
-> A Cloudflare API requires a slightly different configuration syntax than anticipated.
-
-The agent should implement the correction and report it.
-
 ### Contract or architecture change
 
 If implementation reveals something that affects:
@@ -245,7 +240,7 @@ Known limitations
 
 ---
 
-# 4. Settled Decisions from M1
+# 4. Settled Decisions from M1 and M2
 
 ## 4.1 Decision creation is not currently a public product capability
 
@@ -259,17 +254,21 @@ to satisfy the practical need to create a decision.
 
 This was rejected as a product capability.
 
-There is currently no requirement for an unauthenticated public decision-creation endpoint.
+The M2 implementation retains the route only as a development-only fixture guarded by a build-time development constant. Its handler is eliminated from the production bundle.
+
+A deployed instance therefore does not expose `/d/new` as a decision-creation endpoint.
 
 For development and demonstration purposes, decisions may be created through seed/development tooling.
+
+M7 must replace the development creation path with the normal seeded demonstration scenario.
 
 If a user-facing decision-creation experience is later desired, it must be explicitly added to the requirements and implementation plan.
 
 ### Rejected decision
 
-Do not preserve `/d/new` as an undocumented public product API.
+Do not preserve `/d/new` as a deployed product API.
 
-Do not allow later agents to assume that M1's temporary creation endpoint is part of the application contract.
+Do not build additional functionality around it.
 
 ---
 
@@ -358,18 +357,81 @@ Do not add `FRAME` to `DecisionStatus` merely to mirror the conceptual product l
 
 ---
 
-## 4.5 Cloudflare implementation details discovered in M1
+## 4.5 No current position is represented by absence of a row
 
-The following M1 discoveries are accepted:
+A participant who has not submitted an initial position has no `current_positions` row.
 
-- static asset `ASSETS` binding is required for the chosen Worker/SPA routing approach
-- TypeScript target is ES2021 because ES2022 class-field semantics caused runtime issues with `@callable()`
-- session resolution may occur inside the Agent because the Agent owns session state
-- session cookie names may be decision-specific
-- permission calculation belongs in testable domain code
-- bootstrap should expose only state that the current milestone can actually provide
+This represents:
 
-These are implementation decisions, not changes to product requirements.
+```text
+no row
+    →
+no current position
+```
+
+The nullable columns remain available for future explicit withdrawal semantics in M5, but M2 does not implement withdrawal.
+
+---
+
+## 4.6 Initial submissions become visible after Reveal
+
+`DecisionBootstrap` includes initial submissions.
+
+Before Reveal:
+
+```text
+initialSubmissions = []
+```
+
+Participants can see that submissions exist but cannot see another participant's:
+
+- selected option
+- confidence
+- reasons
+
+After Reveal:
+
+```text
+initialSubmissions = all submitted initial submissions
+```
+
+Initial submissions remain historical context after Reveal.
+
+M2 verified this privacy boundary across two participant sessions.
+
+---
+
+## 4.7 M2 runtime verification is complete
+
+M2 directly exercised the real Workers runtime and Durable Object SQLite storage.
+
+Verification included:
+
+- 43 passing tests
+- 24 Node tests
+- 19 Workers-runtime tests
+- typecheck
+- production build
+- credential absence from `dist`
+- runtime Agent/SQLite behavior
+- transactionality
+- race behavior
+- Workflow scheduling boundary
+- post-Reveal failure boundary
+
+The transport-level browser path was also exercised using two live sessions against `npm run dev`, including:
+
+```text
+participant link
+→ 303
+→ HttpOnly session cookie
+→ WebSocket
+→ @callable RPC
+```
+
+This verified the server-side/browser transport contract.
+
+Visual rendering of the React components remains an M8 concern.
 
 ---
 
@@ -379,72 +441,43 @@ These are implementation decisions, not changes to product requirements.
 |---|---|---|
 | **M0** | Cloudflare-as-code setup | One-command deployment works |
 | **M1** | Application spine | Real Decision Agent can bootstrap a decision |
-| **M2** | Decision lifecycle | Submit → Reveal works correctly, is directly runtime-tested, and can be exercised end-to-end through the browser |
+| **M2** | Decision lifecycle | Submit → Reveal works correctly, is directly runtime-tested, and can be exercised end-to-end through the browser transport path |
 | **M3** | Discussion | Realtime chronological discussion works |
 | **M4** | Facilitator foundation | AI can analyze Reveal/discussion safely |
 | **M5** | Decision intelligence | Board, cruxes, position changes, brief work |
 | **M6** | Closing + history | Owner closes and Team Agent stores result |
 | **M7** | Seeded demo | Fresh deployment is immediately demonstrable |
-| **M8** | Hardening | Comprehensive tests, evaluation, failure handling, README complete |
+| **M8** | Hardening | Comprehensive tests, visual/E2E verification, evaluation, failure handling, README complete |
 
 ---
 
 # 6. M0 — Cloudflare-as-Code Setup
 
-## Objective
-
-Prove that the Cloudflare infrastructure can be declaratively configured and deployed with minimal dashboard interaction.
-
-## Result
-
 M0 is complete.
 
-Direct evidence established:
+It established:
 
-- clean-clone installation works
-- `npm ci` works from the committed lockfile
-- type generation works
-- typecheck works
-- build works
-- deployment dry-run works
-- `npm run setup` deploys successfully
-- deployed Worker returns HTTP 200
-- Agent and Workflow bindings are provisioned
-- no Cloudflare credentials are deployed to the Worker
-- no credential leakage into build artifacts
-- local development works
+- clean-clone installation
+- type generation
+- typecheck
+- build
+- deployment dry-run
+- one-command deployment
+- deployed Worker
+- Agent bindings
+- Workflow binding
+- credential isolation
+- local development
 
-M0 intentionally did not establish that Durable Objects, SQLite, Workflows, or Workers AI execute correctly.
+M0 did not establish runtime execution of Durable Objects, SQLite, Workflows, or Workers AI.
 
 ---
 
 # 7. M1 — Application Spine
 
-## Objective
-
-Establish the fundamental runtime path:
-
-```text
-Browser
-  ↓
-Worker
-  ↓
-authenticated session
-  ↓
-DecisionAgent
-  ↓
-SQLite
-  ↓
-RPC
-  ↓
-React
-```
-
-## Result
-
 M1 is complete.
 
-M1 established:
+It established:
 
 - Decision Agent execution
 - SQLite-backed Agent state
@@ -453,27 +486,34 @@ M1 established:
 - React application shell
 - Agent-native application interaction
 
-M1 did not implement the decision lifecycle beyond establishing the initial state model.
-
 ---
 
 # 8. M2 — Decision Lifecycle
 
+M2 is complete.
+
 ## Objective
 
-Implement and demonstrate the core:
+Implement:
 
 ```text
 SUBMIT → DISCUSS
 ```
 
-transition and establish the rules around initial submissions and Reveal.
+including:
 
-M2 is also the first milestone that directly proves important runtime properties of the Durable Object implementation.
+- initial submissions
+- automatic Reveal
+- owner-forced Reveal
+- current-position initialization
+- authorization
+- transactional lifecycle invariants
+- post-Reveal Workflow scheduling boundary
+- minimum submission/owner browser UI
 
-## Scope
+## Implementation
 
-Implement:
+Implemented:
 
 ```ts
 submitInitialPosition()
@@ -481,316 +521,74 @@ declareSubmissionsComplete()
 revealDecision()
 ```
 
-and the minimum client UI required to exercise those operations end-to-end.
+Core operations execute transactionally within the Decision Agent.
 
-## Submission UI
+Automatic Reveal occurs within the final submission transaction.
 
-M2 includes:
+Owner-forced Reveal uses the same canonical Reveal implementation.
 
-```text
-SubmissionForm.tsx
-```
+The Reveal Workflow is scheduled only after the successful transaction returns.
 
-The participant must be able to:
+Workflow scheduling failure cannot roll back Reveal.
 
-- select an option
-- select confidence from 1–5
-- enter up to three reasons
-- submit the initial position
-
-The UI must reflect submission state and basic validation/errors.
-
-The UI must not expose other participants' initial submissions before Reveal.
-
-## Owner UI
+## Client UI
 
 M2 includes:
 
-```text
-OwnerControls.tsx
-```
+- submission form
+- owner controls
+- Reveal state
+- current-position display
 
-The owner must be able to:
+M2 does not include discussion UI or realtime discussion behavior.
 
-- see that submissions are still pending
-- declare submissions complete
-- trigger the same server-side Reveal path as automatic Reveal
+## Runtime verification
 
-The control must only be available to the owner.
+M2 directly exercises the Workers runtime.
 
-There is no separate owner credential.
+The runtime test setup uses the Cloudflare Workers Vitest tooling and its required dependency configuration.
 
-## Reveal UI
+M2 directly verifies:
 
-After Reveal, the existing application shell must reflect:
-
-```text
-SUBMIT → DISCUSS
-```
-
-and display the now-visible current positions.
-
-A participant who did not submit should remain represented without an initial/current position.
-
-M2 does not implement the discussion UI itself.
-
-M3 owns:
-
-- discussion layout
-- message rendering
-- message composer
-- realtime discussion UX
-- connection state
-
-## Submission rules
-
-A participant may submit exactly once while the decision is in `SUBMIT`.
-
-Validate transactionally:
-
-- decision status is `SUBMIT`
-- authenticated participant belongs to decision
-- participant has not already submitted
-- option exists
-- confidence is an integer from 1–5
-- no more than three reasons
-
-Initial submissions are immutable.
-
-A participant who has not submitted may not submit after Reveal.
-
-## Automatic Reveal
-
-After a successful initial submission, determine whether all invited participants have submitted.
-
-If all have submitted:
-
-```text
-SUBMIT → DISCUSS
-```
-
-through the canonical `revealDecision()` path.
-
-The transition must occur atomically.
-
-## Owner-forced Reveal
-
-The owner may declare submissions complete at any time while the decision is in `SUBMIT`.
-
-Validate:
-
-- authenticated participant is OWNER
-- decision is in `SUBMIT`
-
-Then invoke the same `revealDecision()` path used by automatic Reveal.
-
-Do not create separate lifecycle logic for forced Reveal.
-
-## Reveal transaction
-
-Reveal must atomically:
-
-1. change status from `SUBMIT` to `DISCUSS`
-2. set `revealed_at`
-3. initialize `current_positions` from submitted initial positions
-4. leave missing submitters with no current position/confidence
-
-Conceptually:
-
-```text
-submitted participant
-    → current position initialized
-
-non-submitting participant
-    → current position remains null
-```
-
-The initial submission remains historical context.
-
-## Post-Reveal behavior
-
-After Reveal:
-
-- no new initial submissions are accepted
-- participants without initial submissions may still participate in discussion
-- current positions become the authoritative participant position
-- the facilitator may subsequently observe explicit position changes
-
-## Reveal AI scheduling boundary
-
-After the Reveal transaction commits:
-
-```text
-DecisionAgent
-    ↓
-Reveal Workflow
-```
-
-The AI operation must not be part of the Reveal transaction.
-
-AI failure must not prevent the decision from entering `DISCUSS`.
-
-The actual facilitator model invocation is M4.
-
-M2 must establish and test the scheduling boundary without requiring a real LLM invocation.
-
-## Runtime testing requirement
-
-M2 must include the minimum Cloudflare Workers runtime test infrastructure necessary to directly exercise:
-
-- real Decision Agent execution
-- real Durable Object SQLite storage
-- real Durable Object serialization
+- real Durable Object execution
+- real SQLite persistence
+- serialization
 - transactionality
-- concurrent lifecycle operations
-- post-commit Workflow scheduling behavior
+- lifecycle races
+- post-commit Workflow scheduling
 
-Use the Cloudflare-supported Workers Vitest runtime tooling (`@cloudflare/vitest-pool-workers`) or the equivalent runtime mechanism already established by the repository.
+## Browser/transport verification
 
-Do not use a hand-rolled in-memory SQLite or Durable Object shim to claim runtime correctness.
+M2 verified the browser transport path through two live sessions.
 
-The runtime test harness is part of M2, not deferred to M8.
+The verification covered:
 
-It is acceptable to use a test double for the Workflow itself when the purpose of the test is to prove that the Decision Agent schedules the Workflow only after commit.
-
-The test must nevertheless execute the Decision Agent in the actual Workers runtime.
-
-## Required race tests
-
-At minimum, directly test:
-
-### Final submission vs. owner force-reveal
-
-Whichever transaction commits first determines the Reveal boundary.
-
-### Submission vs. Reveal
-
-A submission that commits after Reveal is rejected.
-
-### Duplicate submission
-
-Only one initial submission may exist for a participant.
-
-### Reveal transaction failure
-
-A failed operation before commit must not leave a partially transitioned decision.
-
-## Required scheduling test
-
-Prove:
-
-```text
-successful Reveal transaction
-        ↓
-commit
-        ↓
-schedule Reveal Workflow
-```
-
-rather than:
-
-```text
-schedule Workflow
-        ↓
-attempt Reveal transaction
-```
-
-The test should establish that a failed Reveal transaction does not schedule the AI job.
-
-## Required AI-failure boundary test
-
-M2 does not need to invoke a real Workers AI model.
-
-Instead, establish the application boundary such that a failure in the post-Reveal AI processing path cannot roll back the already-committed:
-
-```text
-SUBMIT → DISCUSS
-```
-
-transition.
-
-The test should demonstrate:
-
-```text
-Reveal committed
-        ↓
-AI/Workflow failure
-        ↓
-decision remains DISCUSS
-```
-
-## Authorization
-
-Participant:
-
-- may submit own initial position
-- may not submit for another participant
-
-Owner:
-
-- all participant permissions
-- may declare submissions complete
-
-No separate owner credential is introduced.
-
-## Acceptance criteria
-
-M2 is complete when:
-
-### Browser experience
-
-- a participant can complete an initial submission through the browser UI
-- submission UI enforces the basic input constraints
-- an owner can declare submissions complete through the browser UI
-- automatic Reveal is observable through the browser
-- owner-forced Reveal is observable through the browser
-- after Reveal, current positions are visible
-- non-submitters remain without a position
-- no initial submissions are exposed before Reveal
-
-### Domain behavior
-
-- valid initial submission
-- duplicate submission rejection
-- invalid option rejection
-- invalid confidence rejection
-- more than three reasons rejected
-- automatic Reveal
+- persistent participant links
+- session establishment
+- authentication
+- initial submission
+- one-shot immutability
+- validation failures
+- cross-participant privacy
 - owner-forced Reveal
-- missing submission does not prevent forced Reveal
-- initial submissions become immutable after Reveal
-- current positions initialize correctly
-- non-submitters can participate after Reveal
+- automatic Reveal
+- current-position initialization
+- non-submitter behavior
+- late submission rejection
 
-### Runtime behavior
+Visual React rendering remains unverified until M8.
 
-- Decision Agent executes in the Workers runtime
-- SQLite persistence works in the real Durable Object
-- Durable Object serialization is exercised directly
-- concurrent lifecycle operations behave deterministically
-- submission/Reveal races have deterministic outcomes
-- Reveal is atomic
-- AI scheduling occurs only after successful Reveal commit
-- a failed Reveal does not schedule AI processing
-- failure in post-Reveal AI processing does not roll back Reveal
+## M2 limitations
 
-## Explicit non-goals
+M2 does not provide:
 
-M2 does not implement:
-
-- discussion layout
-- discussion message composer
-- realtime discussion UX
-- facilitator reasoning
-- facilitator interventions
-- crux detection
-- conflict detection
-- Current State Brief
-- closing
-- Team history
-- position changes
+- realtime updates
+- active facilitator execution
 - actual Workers AI inference
-- substantive discussion AI
+- discussion UI
+- seeded production demonstration
+
+These are intentionally owned by later milestones.
 
 ---
 
@@ -799,8 +597,6 @@ M2 does not implement:
 ## Objective
 
 Implement the live asynchronous discussion experience.
-
-M3 builds directly on the Discuss state produced by M2.
 
 ## Message model
 
@@ -916,7 +712,7 @@ Measure:
 
 If the initial Llama 3.3 model is inadequate, evaluate another model before continuing.
 
-Verify actual Workers AI inference and resolve the remaining model-binding/permission question from M0/M1.
+Verify actual Workers AI inference and resolve the remaining model-binding/permission question.
 
 ## Facilitator pipeline
 
@@ -1205,7 +1001,7 @@ Team Agent stores closed history only.
 
 ## Objective
 
-Make the deployed application immediately demonstrable.
+Make the deployed application immediately demonstrable without relying on the development-only decision creation fixture.
 
 ## Seed scenario
 
@@ -1224,6 +1020,16 @@ with:
 - backdated discussion
 - facilitator state
 - meaningful disagreement
+
+## Seed mechanism
+
+Provide an idempotent seed mechanism that can create the demonstration decision without exposing `/d/new` as a production API.
+
+The seed mechanism should produce the participant links required for demonstration.
+
+The existing M1/M2 `frameDecision()` capability may be used internally by setup/seed tooling.
+
+It is not a user-facing product API.
 
 ## No demo mode
 
@@ -1293,22 +1099,31 @@ Cover:
 - stale results
 - coalescing
 
-## E2E
+## E2E and visual verification
 
-Exercise:
+Exercise the actual browser UI across the complete lifecycle.
 
-```text
-persistent link
-→ brief
-→ submit
-→ reveal
-→ discussion
-→ facilitator intervention
-→ position change
-→ close
-→ closing memo
-→ Team history
-```
+Verify:
+
+- React rendering
+- submission form
+- owner controls
+- Reveal
+- discussion
+- realtime updates
+- facilitator messages
+- board
+- Current State Brief
+- position changes
+- closing
+- closing memo
+- Team history
+
+## M2 visual gap
+
+M2's server/runtime and browser transport behavior are already verified.
+
+M8 is responsible for the remaining visual/UI verification that could not be performed without browser automation.
 
 ## README
 
@@ -1329,6 +1144,8 @@ Document:
 - local development
 - known limitations
 - AI-assisted development process
+- development-only `/d/new` behavior and its non-contractual status
+- Workers/Vitest runtime test setup and dependency requirements
 
 The security limitation must explicitly state:
 
@@ -1457,6 +1274,8 @@ npm install
 npm run setup
 ```
 
+The deployed application does not expose `/d/new` as a product decision-creation endpoint.
+
 ## Demo
 
 A fresh deployment contains a seeded decision demonstrating the core product value.
@@ -1468,6 +1287,7 @@ A fresh deployment contains a seeded decision demonstrating the core product val
 - Concurrency behavior is tested.
 - AI failure is tested.
 - Model evaluation is performed.
+- Browser/UI behavior is E2E verified.
 - README explains architecture and intentional limitations.
 
 ---
@@ -1501,13 +1321,17 @@ M2 Result / Findings
     ↓
 Implementation Plan Revision 1.2
     ↓
-M2 Agent Prompt updated for runtime testing
+M2 runtime-testing clarification
     ↓
 M2 Result / Findings
     ↓
 Implementation Plan Revision 1.3
     ↓
-M2 Agent Prompt updated for client UI
+M2 UI clarification
+    ↓
+M2 Result / Findings
+    ↓
+Implementation Plan Revision 1.4
     ↓
 M3 Agent Prompt
     ↓
