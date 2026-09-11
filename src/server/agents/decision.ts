@@ -255,9 +255,12 @@ export class DecisionAgent extends Agent<Env> {
   }
 
   private participants(): Participant[] {
+    // Owner first, then alphabetical. Framing writes every participant with
+    // the same `created_at`, so ordering by it alone breaks ties on UUID —
+    // arbitrary, and different on every decision.
     return this.sql<ParticipantRow>`
       SELECT id, display_name, is_owner, created_at, last_visited_at
-      FROM participants ORDER BY created_at, id
+      FROM participants ORDER BY is_owner DESC, display_name ASC, created_at
     `.map((r) => ({
       id: r.id,
       displayName: r.display_name,
