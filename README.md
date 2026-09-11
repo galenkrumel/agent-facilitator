@@ -5,7 +5,7 @@ discusses openly. A neutral AI facilitator helps the team surface conflicting
 assumptions — it does not make the decision, recommend an option, or coach
 participants.
 
-> **Implementation status: M4 (facilitator foundation).**
+> **Implementation status: M5 (decision intelligence).**
 > The deployment path is in place (M0) and a decision can be framed and opened
 > through a participant link (M1). A participant submits a private initial
 > position, and the decision reveals — automatically once everyone has
@@ -13,10 +13,13 @@ participants.
 > `SUBMIT` to `DISCUSS` and publishing the positions (M2). The revealed
 > decision has a live discussion: participants post to one shared chronological
 > thread and see each other's messages without refreshing (M3). The facilitator
-> now reads the decision after the Reveal and after each message, and may post
-> a neutral intervention into the thread (M4). The participant-facing board,
-> the Current State Brief, position changes, closing and team history are built
-> in M5–M8; the full documentation required by M8 replaces this file's later
+> reads the decision after the Reveal and after each message, and may post a
+> neutral intervention into the thread (M4). It now also maintains the
+> participant-facing board, applies the position changes participants state
+> explicitly, asks for a confidence a change did not carry, holds back an
+> intervention on an issue nothing has happened to, and writes each participant
+> a Current State Brief on opening (M5). Closing and team history are built in
+> M6–M8; the full documentation required by M8 replaces this file's later
 > sections.
 
 ## Architecture (as configured)
@@ -191,6 +194,105 @@ can do is blocked by it.
 The facilitator's own messages never schedule analysis — that loop is the whole
 reason the rule exists.
 
+## The board
+
+The participant-facing board is exactly three things:
+
+```text
+Current Positions
+Cruxes
+Action Items
+```
+
+It is projected on every read — positions from `current_positions`, the rest
+from the facilitator's state. There is no board table: a stored board is a
+board that can disagree with the decision it describes. Participants cannot
+edit board items; the way to change the board is to say something.
+
+Assumptions and conflicts are deliberately *not* on it. The facilitator
+maintains more than it exposes: an inferred assumption is a hypothesis about
+somebody, and a list of them presented as a board reads as a verdict on how the
+team is thinking. They reach participants as questions in the discussion, and
+the challenged ones in the brief.
+
+## Changing position
+
+A current position is the participant's own to state. The facilitator applies a
+change only when someone has said, in so many words, that they are changing it:
+
+```text
+explicit === true    →  the current position moves
+anything else        →  nothing happens
+```
+
+Reasoning that evolves, a concession, an argument that now looks weaker — none
+of those is a position change, and an inferred one is dropped twice: by the
+validator, and again by the Agent, which is the authority over what may touch a
+position.
+
+If an explicit change names a new option but no confidence, the confidence is
+cleared rather than carried over from the option they have just left, and the
+facilitator asks for it — once, deterministically, not when the model
+remembers to. The question is tracked as a pending request and closes when the
+participant answers, which they do by saying the number in the discussion like
+anything else. A participant who never submitted can acquire a position this
+way; their initial submission stays absent, because a current position is not a
+submission.
+
+## Intervening selectively
+
+Observe continuously, intervene selectively. The hard half is not deciding
+whether the facilitator has something to say — it usually does — but whether
+saying it again tells the team anything.
+
+Each intervention carries an **issue key**: the model's own identifier for the
+underlying issue, reused across analyses even when it would now word the issue
+differently. Each one is stored with a **digest of what the decision materially
+consisted of** when it was made — every assumption, crux and conflict with its
+status, and every current position. An issue already raised is raised again
+only if that digest has since moved:
+
+```text
+message          the facilitator's reading        outcome
+─────────────────────────────────────────────────────────────
+A                new issue identified             intervenes
+B (same ground)  identical reading                silent
+C (new evidence) assumption now CHALLENGED        intervenes
+```
+
+Silence at B does not depend on how the intervention is worded — a re-worded
+intervention about an unchanged reading is exactly what a repeat looks like in
+practice, and is precisely what the digest catches and a string comparison does
+not. A verbatim check remains as a backstop for the same issue arriving under a
+freshly invented key.
+
+Its known ceiling: the digest covers the whole facilitator model rather than
+the part belonging to one issue, so an unrelated development elsewhere can
+re-open an issue that has not itself moved. Linking each issue to the state it
+rests on would mean trusting the model to maintain that link across analyses,
+which is a great deal more than trusting it with an identifier.
+
+## The Current State Brief
+
+Opening a decision produces a brief: where it stands on a first visit, and what
+has moved since **the last time this participant opened it** — not since the
+last message — on a returning one. Reading the brief *is* the visit, so it is
+read once per opening rather than on every realtime update; a brief re-read on
+every projection change would reset its own boundary and have nothing to report
+ever again.
+
+It is composed from authoritative state rather than written by the model. A
+generated summary of a disagreement is one sentence away from being an argument
+about it, and a participant who reads "the case for slipping has grown" has
+been recommended an option by a facilitator that is not allowed to recommend
+one. Counting what changed cannot do that, arrives instantly, needs no
+Workflow, and cannot be stale. The facilitator's judgement still reaches the
+participant here — the cruxes, the challenged assumptions and the questions are
+all its reading of the discussion. What is deterministic is the summarising.
+
+Before the Reveal the brief says how many have submitted and nothing about what
+they submitted.
+
 ## Model evaluation
 
 The requirements name Llama 3.3 *subject to* an evaluation against a scripted
@@ -228,6 +330,12 @@ npm run eval -- --model=@cf/…   # score a candidate model
 The script exits non-zero when a criterion fails, and prints every intervention
 it produced — neutrality is not something keyword matching can score, so that
 judgement stays with a human reading the output.
+
+M5 added one criterion to it: **no inferred position changes.** Nobody in the
+transcript changes position — Priya says in so many words that she has not — so
+every change reported against it is one the model inferred, and an inferred
+change is the one kind of model error that would rewrite a participant's stated
+position for them.
 
 ## Prerequisites
 
