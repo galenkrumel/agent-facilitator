@@ -11,9 +11,14 @@
     "setup": "node scripts/setup.ts",
     "seed": "node scripts/seed.ts",
     "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:agents": "vitest run --project agents",
     "eval": "node evals/facilitator-eval.ts",
     "types": "wrangler types env.d.ts",
     "check": "tsc --noEmit"
+  },
+  "engines": {
+    "npm": ">=11"
   },
   "dependencies": {
     "agents": "^0.22.0",
@@ -22,6 +27,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.54.7",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.0.1",
     "@types/react": "^19.2.17",
@@ -30,7 +36,7 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
-    "vitest": "^5.0.0",
+    "vitest": "4.1.11",
     "wrangler": "^4.131.0"
   }
 }

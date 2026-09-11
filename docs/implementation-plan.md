@@ -1,23 +1,43 @@
 # Async Decision Facilitator
-## Repo-Level Implementation Plan
+## Repo-Level Implementation Plan — Revision 1.3
 
-## 1. Purpose
+## Revision History
 
-This document translates the product requirements and technical design into a sequence of bounded implementation milestones.
-
-The implementation is intentionally incremental. Each milestone produces a runnable, testable artifact before the next milestone begins.
-
-The architecture is established by the requirements and technical design; implementation agents should not independently redesign it.
-
-The implementation plan is expected to evolve as implementation reveals new information. When implementation uncovers a technical constraint, Cloudflare platform behavior, or a better implementation approach that materially affects the architecture or subsequent milestones, the finding should be reported and incorporated into this plan before proceeding.
+| Revision | Change |
+|---|---|
+| **1.0** | Initial repo-level implementation plan |
+| **1.1** | Incorporated M1 findings; clarified decision creation, persisted lifecycle states, owner credential model, session persistence, and explicitly rejected a public `/d/new` product endpoint |
+| **1.2** | Added minimum Workers-runtime integration testing to M2 so transactionality, Durable Object serialization, race determinism, and post-commit Workflow scheduling can be directly proven |
+| **1.3** | Explicitly assigned the minimum submission/owner UI to M2. M2 now delivers the Submit → Reveal experience end-to-end in the browser; M3 owns the discussion UI and realtime discussion experience |
 
 ---
 
-# 2. Implementation principles
+# 1. Purpose
 
-### 2.1 The architecture is decided before coding
+This document translates the product requirements and technical design into a sequence of bounded implementation milestones.
 
-The following architectural decisions are fixed unless implementation evidence demonstrates that they are infeasible:
+The implementation is incremental. Each milestone produces a runnable, testable artifact before the next milestone begins.
+
+The requirements document and this implementation plan constitute the primary design record for AI-assisted implementation.
+
+Each milestone is intended to be executed by a separate coding agent. The agent receives:
+
+1. the requirements document
+2. this implementation plan
+3. the milestone-specific instructions
+4. relevant prior milestone findings
+
+The implementation plan is a living artifact. It is revised when implementation reveals information that materially changes requirements, architecture, interfaces, testing strategy, or subsequent implementation work.
+
+The latest revision is authoritative.
+
+---
+
+# 2. Implementation Principles
+
+## 2.1 Architecture is established before coding
+
+The following decisions are established unless implementation evidence demonstrates that they are infeasible:
 
 - Decision Agent is the single transactional authority for active decision state.
 - Team Agent owns closed decision history.
@@ -25,15 +45,17 @@ The following architectural decisions are fixed unless implementation evidence d
 - AI processing is asynchronous and durable.
 - Participant operations never depend on successful AI execution.
 - Workflow coordinates AI processing but does not own decision state.
-- Agents SDK provides the application backend/RPC and realtime synchronization.
+- Agents SDK provides application backend/RPC and realtime synchronization.
 - Worker remains thin.
 - Workers AI is the initial model runtime.
 - There is no conventional REST API unless a concrete platform requirement emerges.
 - Board state is a projection, not a generic persistence model.
 - Participant identity is based on persistent bearer credentials.
 - Current participant position is authoritative over initial submission.
+- Cloudflare infrastructure should be declaratively configured through Wrangler wherever possible.
+- Manual Cloudflare dashboard interaction should be minimized.
 
-### 2.2 Keep Cloudflare interaction programmatic
+## 2.2 Keep Cloudflare interaction programmatic
 
 The desired developer experience is:
 
@@ -47,135 +69,166 @@ deploy + provision + seed
 application is usable
 ```
 
-Manual Cloudflare dashboard configuration should be minimized.
-
-The repository should declaratively configure Cloudflare resources through Wrangler wherever possible.
+The repository should own infrastructure configuration through Wrangler.
 
 Do not introduce custom Cloudflare provisioning APIs unless Wrangler cannot express a required configuration.
 
-### 2.3 AI is an untrusted dependency
+## 2.3 AI is an untrusted dependency
 
-LLM output must never be trusted simply because it conforms to the expected prompt.
-
-AI output must pass:
+LLM output must pass:
 
 1. parsing
 2. schema validation
 3. semantic validation
 4. transactional application
 
-Malformed or unsafe AI output must fail without corrupting decision state.
+Malformed or invalid AI output must not corrupt decision state.
 
-### 2.4 Agents own state; Workflows own execution
+## 2.4 Agents own state; Workflows own execution
 
-Decision Agent:
+Decision Agent owns:
 
-```text
-authoritative state
-transactions
-permissions
-realtime projection
-AI scheduling/coalescing
-```
+- authoritative state
+- transactions
+- permissions
+- realtime projection
+- AI scheduling/coalescing
 
-Workflow:
+Workflow owns:
 
-```text
-durable AI execution
-retry
-model invocation
-output validation
-```
+- durable AI execution
+- retries
+- model invocation
+- output validation pipeline
 
 Workflow does not become the system of record.
 
-### 2.5 No silent scope expansion
+## 2.5 Runtime acceptance criteria must be directly provable
+
+A milestone must not claim to prove behavior that can only be tested in a later runtime environment.
+
+When an acceptance criterion concerns:
+
+- Durable Object serialization
+- SQLite transactionality
+- Cloudflare runtime behavior
+- Workflow scheduling
+- post-commit behavior
+- race determinism
+
+the milestone must include the minimum runtime test infrastructure required to directly exercise that behavior.
+
+Do not replace runtime verification with mocks or hand-rolled in-memory Durable Object or SQLite shims merely to satisfy an acceptance criterion.
+
+Comprehensive test hardening may remain a later milestone, but required runtime infrastructure must exist when the behavior is first introduced.
+
+## 2.6 Milestones should produce vertical slices
+
+When a milestone introduces user-visible behavior, it should include the minimum client UI required to exercise that behavior end-to-end.
+
+Later milestones own their own richer UX.
+
+The goal is not to build the entire UI early; it is to avoid creating server functionality that cannot be exercised through the actual application.
+
+## 2.7 No silent scope expansion
 
 Do not add:
 
 - accounts
+- account recovery
 - email
 - notifications
-- general AI coaching
-- recommendations
+- invitation management
 - presence
 - nested conversations
+- message editing/deletion
+- explicit mentions
+- position-change history
 - evidence/provenance UI
+- general AI coaching
+- AI recommendations
 - sophisticated history/search
 - post-close action tracking
 - deadlines
 - voice
 - mobile-specific behavior
+- file uploads
 - integrations
 
 unless explicitly added to the requirements.
 
 ---
 
-# 3. Agent execution protocol
+# 3. Agent Execution Protocol
 
-Each milestone is intended to be handed to a separate coding agent.
+Each milestone is a bounded implementation assignment.
 
-The agent receives:
-
-1. the requirements document
-2. this implementation plan
-3. the specific milestone below
-
-The agent should implement only that milestone.
-
-## At the beginning of a milestone
+## Before implementation
 
 The agent should:
 
 - inspect the existing repository
-- inspect the implementation already completed
+- inspect completed implementation
+- review the current plan
 - identify relevant existing contracts
-- confirm the milestone's assumptions
-- avoid rewriting completed work unnecessarily
+- verify milestone assumptions
+
+The agent should not redesign completed architecture merely because another approach is personally preferred.
 
 ## During implementation
 
 The agent should:
 
-- preserve established interfaces unless there is a compelling reason to change them
+- preserve established interfaces
 - write tests for important behavior
 - prefer simple implementations
 - avoid speculative abstractions
-- document meaningful discoveries
-- avoid introducing dependencies without justification
+- avoid unnecessary dependencies
+- document meaningful implementation discoveries
+- distinguish implementation details from product/architecture changes
 
 ## When implementation reveals new information
 
-The agent should distinguish:
-
 ### Local implementation discovery
 
-Example:
-
-> Wrangler requires a slightly different configuration syntax than initially expected.
-
-The agent may resolve this locally and report it.
-
-### Contract change
+The agent may resolve locally when the change does not materially affect requirements or architecture.
 
 Example:
 
-> The Agents SDK cannot support the proposed authentication mechanism.
+> A Cloudflare API requires a slightly different configuration syntax than anticipated.
 
-The agent should stop before silently changing the architecture and report:
+The agent should implement the correction and report it.
 
-- what was discovered
-- why the existing plan doesn't work
-- proposed alternative
-- affected milestones
-- tradeoffs
+### Contract or architecture change
 
-The implementation plan is then updated before dependent work proceeds.
+If implementation reveals something that affects:
 
-## At milestone completion
+- requirements
+- security model
+- lifecycle semantics
+- persistence model
+- Agent/Workflow boundaries
+- public API
+- future milestone assumptions
+- ability to directly prove an acceptance criterion
 
-The agent should report:
+the agent should not silently redesign the system.
+
+It should report:
+
+```text
+What was discovered
+Why the existing plan is insufficient
+Proposed alternative
+Tradeoffs
+Affected milestones
+```
+
+The plan is then revised before dependent work proceeds.
+
+## Milestone completion report
+
+Every agent should report:
 
 ```text
 Implementation summary
@@ -185,139 +238,191 @@ Tests run
 Deployment verification
 Important discoveries
 Deviations from plan
+Rejected alternatives
 Recommended changes to future milestones
 Known limitations
 ```
 
-This report becomes input to the next planning iteration.
+---
+
+# 4. Settled Decisions from M1
+
+## 4.1 Decision creation is not currently a public product capability
+
+M1 introduced:
+
+```text
+POST /d/new
+```
+
+to satisfy the practical need to create a decision.
+
+This was rejected as a product capability.
+
+There is currently no requirement for an unauthenticated public decision-creation endpoint.
+
+For development and demonstration purposes, decisions may be created through seed/development tooling.
+
+If a user-facing decision-creation experience is later desired, it must be explicitly added to the requirements and implementation plan.
+
+### Rejected decision
+
+Do not preserve `/d/new` as an undocumented public product API.
+
+Do not allow later agents to assume that M1's temporary creation endpoint is part of the application contract.
 
 ---
 
-# 4. Milestone overview
+## 4.2 Owner is a normal participant
+
+The owner is represented by:
+
+```text
+Participant {
+  role: "OWNER"
+}
+```
+
+There is no separate Owner entity.
+
+The owner receives one persistent participant credential/link.
+
+That credential grants:
+
+- normal participant capabilities
+- owner-only capabilities
+
+There is not a separate participant link plus owner link.
+
+### Rejected decision
+
+Do not introduce a second owner-specific credential.
+
+---
+
+## 4.3 Persistent credential and session are different concepts
+
+The persistent participant link is the durable identity credential.
+
+The browser session is temporary authentication state.
+
+```text
+Persistent participant link
+        ↓
+browser session cookie
+        ↓
+authenticated Agent interaction
+```
+
+The persistent link:
+
+- does not expire automatically
+- can be reused
+- can establish sessions in different browsers/devices
+
+The session:
+
+- is browser-local
+- may expire
+- does not replace the persistent link
+
+Losing the persistent link means there is no account-recovery mechanism.
+
+A session store is an acceptable implementation detail.
+
+---
+
+## 4.4 Frame is conceptual, not persisted
+
+The product lifecycle is described as:
+
+```text
+Frame → Submit → Discuss → Close
+```
+
+But `Frame` is the act of creating/configuring the decision.
+
+The persisted decision state is:
+
+```text
+SUBMIT → DISCUSS → CLOSED
+```
+
+A newly created decision enters `SUBMIT`.
+
+There is no persisted `FRAME` status.
+
+### Rejected decision
+
+Do not add `FRAME` to `DecisionStatus` merely to mirror the conceptual product lifecycle.
+
+---
+
+## 4.5 Cloudflare implementation details discovered in M1
+
+The following M1 discoveries are accepted:
+
+- static asset `ASSETS` binding is required for the chosen Worker/SPA routing approach
+- TypeScript target is ES2021 because ES2022 class-field semantics caused runtime issues with `@callable()`
+- session resolution may occur inside the Agent because the Agent owns session state
+- session cookie names may be decision-specific
+- permission calculation belongs in testable domain code
+- bootstrap should expose only state that the current milestone can actually provide
+
+These are implementation decisions, not changes to product requirements.
+
+---
+
+# 5. Milestone Overview
 
 | Milestone | Objective | Exit condition |
 |---|---|---|
-| M0 | Cloudflare-as-code setup | One-command deployment works |
-| M1 | Application spine | Real Decision Agent can bootstrap a decision |
-| M2 | Decision lifecycle | Frame → Submit → Reveal works |
-| M3 | Discussion | Realtime chronological discussion works |
-| M4 | Facilitator foundation | AI can analyze Reveal/discussion safely |
-| M5 | Decision intelligence | Board, cruxes, position changes, brief work |
-| M6 | Closing + history | Owner closes and Team Agent stores result |
-| M7 | Seeded demo | Fresh deployment is immediately demonstrable |
-| M8 | Hardening | Tests, model evaluation, failure handling, README complete |
-
-The milestones deliberately put infrastructure and the application spine first, before substantial AI or UI work.
+| **M0** | Cloudflare-as-code setup | One-command deployment works |
+| **M1** | Application spine | Real Decision Agent can bootstrap a decision |
+| **M2** | Decision lifecycle | Submit → Reveal works correctly, is directly runtime-tested, and can be exercised end-to-end through the browser |
+| **M3** | Discussion | Realtime chronological discussion works |
+| **M4** | Facilitator foundation | AI can analyze Reveal/discussion safely |
+| **M5** | Decision intelligence | Board, cruxes, position changes, brief work |
+| **M6** | Closing + history | Owner closes and Team Agent stores result |
+| **M7** | Seeded demo | Fresh deployment is immediately demonstrable |
+| **M8** | Hardening | Comprehensive tests, evaluation, failure handling, README complete |
 
 ---
 
-# M0 — Cloudflare-as-Code Setup
+# 6. M0 — Cloudflare-as-Code Setup
 
 ## Objective
 
-Prove that the project can be deployed with minimal human interaction with the Cloudflare dashboard.
+Prove that the Cloudflare infrastructure can be declaratively configured and deployed with minimal dashboard interaction.
 
-## Human setup
+## Result
 
-The user should need only:
+M0 is complete.
 
-- a Cloudflare account
-- a Cloudflare API token
-- the Cloudflare Account ID
+Direct evidence established:
 
-The exact minimum token permissions should be verified against actual deployment behavior rather than guessed.
+- clean-clone installation works
+- `npm ci` works from the committed lockfile
+- type generation works
+- typecheck works
+- build works
+- deployment dry-run works
+- `npm run setup` deploys successfully
+- deployed Worker returns HTTP 200
+- Agent and Workflow bindings are provisioned
+- no Cloudflare credentials are deployed to the Worker
+- no credential leakage into build artifacts
+- local development works
 
-## Repository responsibilities
-
-Create:
-
-```text
-wrangler.jsonc
-.env.example
-scripts/setup.ts
-package.json
-```
-
-Configure:
-
-- Worker
-- static assets
-- DecisionAgent Durable Object
-- TeamAgent Durable Object
-- SQLite storage
-- Facilitator Workflow
-- Workers AI binding
-- required compatibility settings
-- observability where appropriate
-
-## `npm` interface
-
-Provide:
-
-```bash
-npm run dev
-npm run build
-npm run deploy
-npm run setup
-npm run seed
-npm test
-npm run eval
-npm run types
-```
-
-The normal fresh-install path is:
-
-```bash
-npm install
-cp .env.example .env
-# add Cloudflare credentials
-npm run setup
-```
-
-## `setup.ts`
-
-The setup process should:
-
-1. validate required environment variables
-2. validate Cloudflare authentication
-3. generate types if necessary
-4. build
-5. deploy
-6. seed the demonstration scenario
-7. print application/demo URLs
-
-It should not manually create Cloudflare resources through REST APIs unless Wrangler cannot provision something required.
-
-## Acceptance criteria
-
-A fresh developer can:
-
-```bash
-npm install
-npm run setup
-```
-
-and obtain a deployed application without manually creating:
-
-- Workers
-- Durable Object namespaces
-- SQLite databases
-- Workflows
-- Workers AI bindings
-
-in the dashboard.
-
-## Important discovery to capture
-
-Record the actual minimum Cloudflare API token permissions required.
+M0 intentionally did not establish that Durable Objects, SQLite, Workflows, or Workers AI execute correctly.
 
 ---
 
-# M1 — Application Spine
+# 7. M1 — Application Spine
 
 ## Objective
 
-Establish the fundamental application path:
+Establish the fundamental runtime path:
 
 ```text
 Browser
@@ -335,205 +440,369 @@ RPC
 React
 ```
 
-No meaningful product behavior or AI is required yet.
+## Result
 
-## Repository
+M1 is complete.
 
-Create:
+M1 established:
 
-```text
-src/server/index.ts
-src/server/agents/decision.ts
-src/server/agents/team.ts
-src/server/auth/credentials.ts
-src/server/auth/sessions.ts
-src/server/db/decision-schema.ts
-src/shared/types.ts
-```
+- Decision Agent execution
+- SQLite-backed Agent state
+- participant authentication/session model
+- bootstrap RPC
+- React application shell
+- Agent-native application interaction
 
-## Shared domain contracts
-
-Implement the established domain types:
-
-- Decision
-- Participant
-- InitialSubmission
-- CurrentPosition
-- Message
-- facilitator state types
-- BoardView
-- StateBrief
-- Permissions
-- DecisionBootstrap
-- FacilitatorContext
-- FacilitatorAnalysisResult
-- ClosingMemo
-
-Do not duplicate these contracts in the frontend or AI layer.
-
-## SQLite
-
-Implement the authoritative Decision Agent schema:
-
-```text
-decisions
-participants
-initial_submissions
-current_positions
-messages
-facilitator_assumptions
-facilitator_cruxes
-facilitator_conflicts
-facilitator_action_items
-facilitator_meta
-pending_participant_requests
-```
-
-Do not create a generic `board_items` table.
-
-## Authentication
-
-Support:
-
-```text
-/d/:decisionId/p/:credential
-```
-
-The Worker validates the persistent participant credential through the Decision Agent and establishes a browser-local HTTP-only session.
-
-The persistent credential remains reusable across browsers/devices.
-
-Only credential hashes are persisted.
-
-## Decision Agent
-
-Implement:
-
-```ts
-@callable()
-getBootstrap()
-```
-
-The initial implementation should return the real persisted decision state.
-
-## Frontend
-
-Implement the minimum React shell:
-
-```text
-src/client/main.tsx
-src/client/app/App.tsx
-src/client/hooks/useDecisionAgent.ts
-```
-
-Render:
-
-- question
-- context
-- status
-- participants
-- basic decision state
-
-## Acceptance criteria
-
-A seeded or manually created decision can be opened through its participant link.
-
-The application:
-
-- authenticates the participant
-- establishes a session
-- connects to the Decision Agent
-- reads SQLite-backed state
-- renders the decision
-- survives refresh
-- works when the same persistent link is opened from another browser
-
-No AI is required.
+M1 did not implement the decision lifecycle beyond establishing the initial state model.
 
 ---
 
-# M2 — Frame → Submit → Reveal
+# 8. M2 — Decision Lifecycle
 
 ## Objective
 
-Implement the core decision lifecycle through Reveal.
-
-## Implement
-
-```text
-submitInitialPosition()
-declareSubmissionsComplete()
-revealDecision()
-```
-
-## Submission rules
-
-Validate transactionally:
-
-- status is `SUBMIT`
-- participant has not already submitted
-- option exists
-- confidence is 1–5
-- no more than three reasons
-
-Initial submission is immutable.
-
-## Automatic reveal
-
-When the final invited participant submits:
+Implement and demonstrate the core:
 
 ```text
 SUBMIT → DISCUSS
 ```
 
-## Owner reveal
+transition and establish the rules around initial submissions and Reveal.
 
-The owner may declare submissions complete at any time during Submit.
+M2 is also the first milestone that directly proves important runtime properties of the Durable Object implementation.
 
-This invokes the same reveal path.
+## Scope
+
+Implement:
+
+```ts
+submitInitialPosition()
+declareSubmissionsComplete()
+revealDecision()
+```
+
+and the minimum client UI required to exercise those operations end-to-end.
+
+## Submission UI
+
+M2 includes:
+
+```text
+SubmissionForm.tsx
+```
+
+The participant must be able to:
+
+- select an option
+- select confidence from 1–5
+- enter up to three reasons
+- submit the initial position
+
+The UI must reflect submission state and basic validation/errors.
+
+The UI must not expose other participants' initial submissions before Reveal.
+
+## Owner UI
+
+M2 includes:
+
+```text
+OwnerControls.tsx
+```
+
+The owner must be able to:
+
+- see that submissions are still pending
+- declare submissions complete
+- trigger the same server-side Reveal path as automatic Reveal
+
+The control must only be available to the owner.
+
+There is no separate owner credential.
+
+## Reveal UI
+
+After Reveal, the existing application shell must reflect:
+
+```text
+SUBMIT → DISCUSS
+```
+
+and display the now-visible current positions.
+
+A participant who did not submit should remain represented without an initial/current position.
+
+M2 does not implement the discussion UI itself.
+
+M3 owns:
+
+- discussion layout
+- message rendering
+- message composer
+- realtime discussion UX
+- connection state
+
+## Submission rules
+
+A participant may submit exactly once while the decision is in `SUBMIT`.
+
+Validate transactionally:
+
+- decision status is `SUBMIT`
+- authenticated participant belongs to decision
+- participant has not already submitted
+- option exists
+- confidence is an integer from 1–5
+- no more than three reasons
+
+Initial submissions are immutable.
+
+A participant who has not submitted may not submit after Reveal.
+
+## Automatic Reveal
+
+After a successful initial submission, determine whether all invited participants have submitted.
+
+If all have submitted:
+
+```text
+SUBMIT → DISCUSS
+```
+
+through the canonical `revealDecision()` path.
+
+The transition must occur atomically.
+
+## Owner-forced Reveal
+
+The owner may declare submissions complete at any time while the decision is in `SUBMIT`.
+
+Validate:
+
+- authenticated participant is OWNER
+- decision is in `SUBMIT`
+
+Then invoke the same `revealDecision()` path used by automatic Reveal.
+
+Do not create separate lifecycle logic for forced Reveal.
 
 ## Reveal transaction
 
-Atomically:
+Reveal must atomically:
 
-- change status
-- set `revealed_at`
-- initialize current positions
-- give non-submitters null position/confidence
+1. change status from `SUBMIT` to `DISCUSS`
+2. set `revealed_at`
+3. initialize `current_positions` from submitted initial positions
+4. leave missing submitters with no current position/confidence
 
-After commit, schedule Reveal AI processing.
+Conceptually:
 
-AI failure must not roll back Reveal.
+```text
+submitted participant
+    → current position initialized
+
+non-submitting participant
+    → current position remains null
+```
+
+The initial submission remains historical context.
+
+## Post-Reveal behavior
+
+After Reveal:
+
+- no new initial submissions are accepted
+- participants without initial submissions may still participate in discussion
+- current positions become the authoritative participant position
+- the facilitator may subsequently observe explicit position changes
+
+## Reveal AI scheduling boundary
+
+After the Reveal transaction commits:
+
+```text
+DecisionAgent
+    ↓
+Reveal Workflow
+```
+
+The AI operation must not be part of the Reveal transaction.
+
+AI failure must not prevent the decision from entering `DISCUSS`.
+
+The actual facilitator model invocation is M4.
+
+M2 must establish and test the scheduling boundary without requiring a real LLM invocation.
+
+## Runtime testing requirement
+
+M2 must include the minimum Cloudflare Workers runtime test infrastructure necessary to directly exercise:
+
+- real Decision Agent execution
+- real Durable Object SQLite storage
+- real Durable Object serialization
+- transactionality
+- concurrent lifecycle operations
+- post-commit Workflow scheduling behavior
+
+Use the Cloudflare-supported Workers Vitest runtime tooling (`@cloudflare/vitest-pool-workers`) or the equivalent runtime mechanism already established by the repository.
+
+Do not use a hand-rolled in-memory SQLite or Durable Object shim to claim runtime correctness.
+
+The runtime test harness is part of M2, not deferred to M8.
+
+It is acceptable to use a test double for the Workflow itself when the purpose of the test is to prove that the Decision Agent schedules the Workflow only after commit.
+
+The test must nevertheless execute the Decision Agent in the actual Workers runtime.
+
+## Required race tests
+
+At minimum, directly test:
+
+### Final submission vs. owner force-reveal
+
+Whichever transaction commits first determines the Reveal boundary.
+
+### Submission vs. Reveal
+
+A submission that commits after Reveal is rejected.
+
+### Duplicate submission
+
+Only one initial submission may exist for a participant.
+
+### Reveal transaction failure
+
+A failed operation before commit must not leave a partially transitioned decision.
+
+## Required scheduling test
+
+Prove:
+
+```text
+successful Reveal transaction
+        ↓
+commit
+        ↓
+schedule Reveal Workflow
+```
+
+rather than:
+
+```text
+schedule Workflow
+        ↓
+attempt Reveal transaction
+```
+
+The test should establish that a failed Reveal transaction does not schedule the AI job.
+
+## Required AI-failure boundary test
+
+M2 does not need to invoke a real Workers AI model.
+
+Instead, establish the application boundary such that a failure in the post-Reveal AI processing path cannot roll back the already-committed:
+
+```text
+SUBMIT → DISCUSS
+```
+
+transition.
+
+The test should demonstrate:
+
+```text
+Reveal committed
+        ↓
+AI/Workflow failure
+        ↓
+decision remains DISCUSS
+```
+
+## Authorization
+
+Participant:
+
+- may submit own initial position
+- may not submit for another participant
+
+Owner:
+
+- all participant permissions
+- may declare submissions complete
+
+No separate owner credential is introduced.
 
 ## Acceptance criteria
 
-Test:
+M2 is complete when:
 
-- successful submission
+### Browser experience
+
+- a participant can complete an initial submission through the browser UI
+- submission UI enforces the basic input constraints
+- an owner can declare submissions complete through the browser UI
+- automatic Reveal is observable through the browser
+- owner-forced Reveal is observable through the browser
+- after Reveal, current positions are visible
+- non-submitters remain without a position
+- no initial submissions are exposed before Reveal
+
+### Domain behavior
+
+- valid initial submission
 - duplicate submission rejection
-- invalid option
-- invalid confidence
-- more than three reasons
-- automatic reveal
-- owner-forced reveal
-- missing participant submission
-- submission/reveal race
+- invalid option rejection
+- invalid confidence rejection
+- more than three reasons rejected
+- automatic Reveal
+- owner-forced Reveal
+- missing submission does not prevent forced Reveal
+- initial submissions become immutable after Reveal
+- current positions initialize correctly
+- non-submitters can participate after Reveal
 
-The application reaches Discuss even when one or more participants never submitted.
+### Runtime behavior
+
+- Decision Agent executes in the Workers runtime
+- SQLite persistence works in the real Durable Object
+- Durable Object serialization is exercised directly
+- concurrent lifecycle operations behave deterministically
+- submission/Reveal races have deterministic outcomes
+- Reveal is atomic
+- AI scheduling occurs only after successful Reveal commit
+- a failed Reveal does not schedule AI processing
+- failure in post-Reveal AI processing does not roll back Reveal
+
+## Explicit non-goals
+
+M2 does not implement:
+
+- discussion layout
+- discussion message composer
+- realtime discussion UX
+- facilitator reasoning
+- facilitator interventions
+- crux detection
+- conflict detection
+- Current State Brief
+- closing
+- Team history
+- position changes
+- actual Workers AI inference
+- substantive discussion AI
 
 ---
 
-# M3 — Discussion + Realtime
+# 9. M3 — Discussion + Realtime
 
 ## Objective
 
-Implement the live discussion experience.
+Implement the live asynchronous discussion experience.
 
-## Implement
+M3 builds directly on the Discuss state produced by M2.
 
-```ts
-postMessage()
-```
+## Message model
 
 Messages are:
 
@@ -542,28 +811,64 @@ Messages are:
 - flat
 - assigned canonical sequence numbers
 
-No nested replies.
+No:
 
-No message editing/deletion.
+- nested replies
+- editing
+- deletion
+- explicit mentions
 
-No explicit mentions.
+## `postMessage()`
+
+The operation:
+
+1. authenticates participant
+2. verifies `DISCUSS`
+3. validates message
+4. allocates sequence
+5. inserts message
+6. commits
+7. updates realtime projection
+8. schedules facilitator analysis
+
+AI is not part of the message transaction.
+
+## Client UI
+
+Implement:
+
+```text
+Discussion.tsx
+MessageComposer.tsx
+ConnectionStatus.tsx
+```
+
+The discussion UI must:
+
+- display chronological messages
+- distinguish participant and facilitator messages
+- allow authenticated participants to post
+- reflect connection state
+- update without manual refresh
 
 ## Realtime
 
-Use the Agents SDK realtime state projection.
+Use Agents SDK realtime state synchronization.
 
-Maintain only small state:
+Maintain only small projection state:
 
-```text
-status
-participantCount
-submittedCount
-messageCount
-messagesVersion
-positionsVersion
-boardVersion
-facilitatorStatus
-lastActivityAt
+```ts
+interface DecisionRealtimeState {
+  status: DecisionStatus;
+  participantCount: number;
+  submittedCount: number;
+  messageCount: number;
+  messagesVersion: number;
+  positionsVersion: number;
+  boardVersion: number;
+  facilitatorStatus: FacilitatorStatus;
+  lastActivityAt: number | null;
+}
 ```
 
 Historical messages remain in SQLite.
@@ -575,7 +880,7 @@ Decision Agent is the serialization boundary.
 Test:
 
 - simultaneous messages
-- message vs close
+- message vs. close
 - refresh during discussion
 - reconnect
 - multiple concurrent participants
@@ -584,32 +889,34 @@ Test:
 
 Two browser sessions can participate simultaneously.
 
-A message committed by one participant becomes visible to another without manual refresh.
+A committed message becomes visible to other participants without manual refresh.
 
-A refresh reconstructs the complete discussion from authoritative state.
+A refresh reconstructs discussion from authoritative SQLite state.
 
 ---
 
-# M4 — Facilitator Foundation
+# 10. M4 — Facilitator Foundation
 
 ## Objective
 
-Introduce AI without making AI part of the transactional request path.
+Introduce AI safely and prove the model is adequate before substantial facilitator implementation.
 
-## Model evaluation first
+## Model evaluation
 
-Before building sophisticated facilitator behavior, run the scripted approximately 40-message transcript against the initial model.
+Before full facilitator implementation, run the scripted approximately 40-message transcript.
 
 Measure:
 
 - ≥80% assumption identification
-- correct attribution
+- correct participant attribution
 - valid structured output
-- at least one of two implicit conflicts detected
+- detection of at least one of two implicit conflicts
 - no invented conflicts
-- output reliability
+- reliable output formatting
 
-If the model is inadequate, evaluate an alternative before proceeding.
+If the initial Llama 3.3 model is inadequate, evaluate another model before continuing.
+
+Verify actual Workers AI inference and resolve the remaining model-binding/permission question from M0/M1.
 
 ## Facilitator pipeline
 
@@ -631,25 +938,9 @@ semantic validation
 FacilitatorAnalysisResult
 ```
 
-Create:
-
-```text
-src/server/facilitator/context.ts
-src/server/facilitator/prompts/reveal.ts
-src/server/facilitator/prompts/discussion.ts
-src/server/facilitator/schemas.ts
-src/server/facilitator/validation.ts
-```
-
 ## Workflow
 
 Implement:
-
-```text
-src/server/workflows/facilitator.ts
-```
-
-with:
 
 ```text
 REVEAL
@@ -657,38 +948,20 @@ DISCUSSION
 CLOSING
 ```
 
-Workflow input contains only:
+Workflow input:
 
 ```ts
-{
-  decisionId,
-  type
+interface FacilitatorWorkflowInput {
+  decisionId: string;
+  type: FacilitatorWorkflowType;
 }
 ```
 
-The Workflow retrieves current state from the Decision Agent.
+The Workflow retrieves current state from Decision Agent.
 
 It does not receive or own the transcript.
 
-## Reveal processing
-
-After Reveal:
-
-```text
-DecisionAgent
-    ↓
-Reveal Workflow
-    ↓
-LLM
-    ↓
-validated analysis
-    ↓
-DecisionAgent
-```
-
-## Discussion processing
-
-Messages trigger asynchronous analysis.
+## Discussion coalescing
 
 Decision Agent maintains:
 
@@ -700,11 +973,13 @@ lastAnalyzedSequence
 
 Only one discussion analysis runs at a time.
 
-Messages arriving while analysis is running set `analysisPending`.
+Messages arriving during analysis set `analysisPending`.
+
+When the current analysis completes, newly arrived messages are processed.
 
 ## Stale results
 
-AI results include their analyzed sequence range.
+AI results include the sequence range they analyzed.
 
 Decision Agent rejects or ignores stale/duplicate results.
 
@@ -713,36 +988,37 @@ Decision Agent rejects or ignores stale/duplicate results.
 AI failure does not prevent:
 
 - posting messages
+- continuing discussion
 - changing positions
 - closing the decision
 
-Malformed AI output does not corrupt state.
+Malformed AI output cannot corrupt application state.
 
 Facilitator messages do not recursively trigger facilitator analysis.
 
 ---
 
-# M5 — Decision Intelligence
+# 11. M5 — Decision Intelligence
 
 ## Objective
 
-Complete the facilitator behavior and participant-facing decision intelligence.
+Complete the participant-facing decision intelligence.
 
 ## Facilitator state
 
-Implement application of:
+Implement:
 
 - assumptions
 - cruxes
 - conflicts
 - action items
-- facilitator interventions
+- interventions
 
-The facilitator maintains more internal state than the participant-facing board exposes.
+The facilitator maintains more state internally than it exposes to participants.
 
 ## Board
 
-User-facing board contains:
+The participant-facing board contains:
 
 ```text
 Current Positions
@@ -750,9 +1026,9 @@ Cruxes
 Action Items
 ```
 
-Current positions are projected from `current_positions`.
+Current Positions are projected from `current_positions`.
 
-No generic board persistence table.
+No generic board table is introduced.
 
 Participants cannot directly edit board items.
 
@@ -765,17 +1041,17 @@ EXPLICIT
 INFERRED
 ```
 
-Inferred assumptions are hypotheses, not asserted facts.
+Inferred assumptions are hypotheses.
 
-They should be expressed as questions to the relevant participant.
+They must be phrased as questions to the relevant participant rather than asserted as facts.
 
-Significant challenged/refuted assumptions are retained for team history.
+Significant challenged/refuted assumptions are eligible for Team Agent history.
 
 ## Conflicts
 
 Conflicts remain internal facilitator state.
 
-They may lead to:
+A conflict may lead to:
 
 - a crux
 - an intervention
@@ -785,31 +1061,33 @@ The facilitator must not manufacture conflicts.
 
 ## Interventions
 
-Facilitator:
+The facilitator:
 
 - observes continuously
 - intervenes selectively
 - remains neutral
 - serves the collective decision
 - does not recommend options
-- does not coach participants generically
+- does not provide generic reasoning coaching
 - may legitimately remain silent
 
-Repeated interventions on unchanged issues should be avoided.
+The facilitator should not repeat an intervention when the underlying issue has not materially changed.
 
 ## Position changes
 
-The facilitator may identify position changes, but only:
+The facilitator may identify position changes.
+
+Only:
 
 ```text
 explicit === true
 ```
 
-may automatically update the current position.
+may change current position automatically.
 
-Reasoning changes alone must not change position.
+Reasoning changes alone do not change position.
 
-If an explicit position change omits confidence, the facilitator requests confidence.
+If an explicit position change omits confidence, the facilitator asks for confidence.
 
 ## Current State Brief
 
@@ -822,34 +1100,20 @@ getCurrentStateBrief()
 Support:
 
 - first-visit orientation
-- returning-visit meaningful changes
+- returning-visit summary of meaningful changes
 - current positions
 - open cruxes
 - questions needing response
 - challenged assumptions
 - action items
 
-Last visit means last opening/view, not last message.
+Last visit means the participant's last opening/view, not the last message.
 
-The brief must remain neutral.
-
-## Acceptance criteria
-
-The facilitator can:
-
-- identify assumptions
-- attribute them
-- identify cruxes
-- identify conflicts without inventing them
-- intervene selectively
-- maintain action items
-- recognize explicit position changes
-- avoid inferred position changes
-- generate a neutral current-state brief
+The brief is neutral and must not become an implicit recommendation system.
 
 ---
 
-# M6 — Close + Team History
+# 12. M6 — Close + Team History
 
 ## Objective
 
@@ -865,20 +1129,24 @@ closeDecision({
 })
 ```
 
-Transactionally:
+Transaction:
 
 ```text
-verify owner
+verify OWNER
 verify DISCUSS
 verify outcome
 DISCUSS → CLOSED
 ```
 
-There must never be a persistent `CLOSED` state without an owner-declared outcome.
+There must never be a persistent CLOSED decision without an owner-declared outcome.
+
+The outcome is selected/declared by the owner.
+
+The facilitator never selects or infers the outcome.
 
 ## Closing Workflow
 
-After close:
+After the close transaction commits:
 
 ```text
 Closing Workflow
@@ -899,7 +1167,9 @@ The memo contains:
 - dissent
 - action items
 
-The facilitator may synthesize but cannot alter the owner-declared outcome.
+The memo may synthesize existing reasoning but must not invent facts or recommendations.
+
+The owner-declared outcome remains authoritative.
 
 ## Team Agent
 
@@ -917,23 +1187,21 @@ ClosedDecisionRecord
 
 including significant historical learnings.
 
-Team Agent stores only closed decision history, not active decision state.
+Team Agent stores closed history only.
 
 ## Acceptance criteria
 
-Closing is atomic.
-
-Closing cannot occur before Reveal.
-
-Closed decisions are immutable.
-
-Closing memo generation can fail without changing the declared outcome.
-
-Completed decisions appear in Team Agent history.
+- close is atomic
+- only owner can close
+- close requires DISCUSS
+- outcome is required
+- closed decisions are immutable
+- closing memo failure does not change the outcome
+- completed decision is stored in Team Agent history
 
 ---
 
-# M7 — Seeded Demonstration
+# 13. M7 — Seeded Demonstration
 
 ## Objective
 
@@ -941,14 +1209,7 @@ Make the deployed application immediately demonstrable.
 
 ## Seed scenario
 
-Create:
-
-```text
-src/seed/scenario.ts
-scripts/seed.ts
-```
-
-Seed a normal decision already in:
+Create a normal decision already in:
 
 ```text
 DISCUSS
@@ -960,48 +1221,39 @@ with:
 - existing participant(s)
 - initial submissions
 - current positions
-- backdated discussion messages
+- backdated discussion
 - facilitator state
-
-The scenario should contain meaningful disagreement and at least one useful crux.
+- meaningful disagreement
 
 ## No demo mode
 
-Do not introduce:
+Do not introduce demo-specific runtime logic.
 
-```text
-demoMode
-```
-
-or special demo-only application behavior.
-
-The seeded decision is simply an existing decision.
+The demonstration is an ordinary persisted decision.
 
 ## Idempotency
 
-Running:
+Repeated:
 
 ```bash
 npm run seed
 ```
 
-multiple times should not create duplicate demo decisions.
+must not create duplicate demo decisions.
 
 ## Acceptance criteria
 
-A fresh deployment produces usable participant links.
+A fresh deployment contains a usable seeded decision.
 
-A new participant opening the seeded decision receives the Current State Brief and can enter the live discussion.
-
-The demonstration exercises the actual production code paths.
+A new participant can enter through a participant link, receive the Current State Brief, and participate in the discussion.
 
 ---
 
-# M8 — Hardening, Evaluation, and Documentation
+# 14. M8 — Hardening, Evaluation, Documentation
 
 ## Objective
 
-Bring the implementation to take-home quality without turning it into a production system.
+Bring the project to take-home quality without turning it into a production system.
 
 ## Domain tests
 
@@ -1009,7 +1261,7 @@ Cover:
 
 - lifecycle invariants
 - authorization
-- submission immutability
+- immutable submissions
 - position changes
 - confidence handling
 - close semantics
@@ -1022,7 +1274,7 @@ Cover:
 - authentication
 - bootstrap
 - submission
-- reveal
+- Reveal
 - discussion
 - concurrency
 - persistence
@@ -1055,21 +1307,8 @@ persistent link
 → position change
 → close
 → closing memo
-→ team history
+→ Team history
 ```
-
-## Failure model
-
-Verify that AI failures leave the application usable.
-
-The application should tolerate:
-
-- model failures
-- non-deterministic output
-- malformed structured output
-- invalid facilitator observations
-- stale workflow results
-- workflow retry
 
 ## README
 
@@ -1091,11 +1330,13 @@ Document:
 - known limitations
 - AI-assisted development process
 
-The security limitation must explicitly state that possession of a participant link grants the ability to act as that participant and that there is no account recovery.
+The security limitation must explicitly state:
+
+> Participant links are bearer credentials. Anyone possessing a participant link can act as that participant. The links are intentionally lightweight and are not appropriate credentials for sensitive information. There is no account recovery mechanism.
 
 ---
 
-# 5. Final repository structure
+# 15. Final Repository Structure
 
 The expected end state is approximately:
 
@@ -1175,30 +1416,28 @@ The expected end state is approximately:
 └── README.md
 ```
 
-The exact file structure may evolve if implementation demonstrates that another organization is materially cleaner. Such changes should be reported rather than made silently.
+The exact organization may evolve if implementation demonstrates that another structure is materially better. Such changes must be reported and incorporated into a subsequent plan revision when they affect future work.
 
 ---
 
-# 6. Definition of done
+# 16. Definition of Done
 
-The project is complete when:
+## Product
 
-### Product
-
-- A decision can be framed.
-- Participants can privately submit positions.
+- Decision can be framed/configured.
+- Participants privately submit positions.
 - Reveal occurs automatically or by owner declaration.
-- Participants can discuss asynchronously.
-- Participants can explicitly change positions.
+- Participants discuss asynchronously.
+- Participants explicitly change positions.
 - Facilitator surfaces assumptions, conflicts, and cruxes.
 - Facilitator intervenes selectively and neutrally.
 - Board reflects useful current state.
 - Current State Brief orients participants.
-- Owner declares the final outcome.
+- Owner declares final outcome.
 - Closing memo synthesizes reasoning.
-- Closed decision enters team history.
+- Closed decision enters Team history.
 
-### Architecture
+## Architecture
 
 - Decision Agent is authoritative.
 - Team Agent stores history.
@@ -1209,7 +1448,7 @@ The project is complete when:
 - AI output is validated.
 - Stale AI results cannot overwrite newer state.
 
-### Deployment
+## Deployment
 
 A developer can deploy with minimal Cloudflare dashboard interaction:
 
@@ -1218,89 +1457,91 @@ npm install
 npm run setup
 ```
 
-### Demo
+## Demo
 
-A fresh deployment contains a seeded decision that demonstrates the product's core value.
+A fresh deployment contains a seeded decision demonstrating the core product value.
 
-### Engineering quality
+## Engineering quality
 
-- Core invariants have tests.
-- Concurrency behavior has been tested.
-- AI failure has been tested.
-- Model evaluation has been performed.
-- README explains the architecture and intentional limitations.
-
----
-
-# 7. Iteration protocol for the implementation plan
-
-This document is intentionally a living engineering artifact.
-
-After each milestone, the implementation result should be reviewed against the remaining milestones.
-
-If the agent reports:
-
-```text
-new platform behavior
-new dependency
-API limitation
-performance concern
-security concern
-architectural conflict
-better implementation approach
-```
-
-then update this plan before starting the affected milestone.
-
-The update should identify:
-
-```text
-What changed
-Why it changed
-Which architectural decision is affected
-Which milestones are affected
-What the new implementation contract is
-```
-
-Do not allow downstream coding agents to inherit contradictory instructions.
-
-The latest version of this plan is authoritative.
+- Core invariants are tested.
+- Runtime-dependent behavior is tested in the appropriate runtime.
+- Concurrency behavior is tested.
+- AI failure is tested.
+- Model evaluation is performed.
+- README explains architecture and intentional limitations.
 
 ---
 
-# 8. AI-assisted development record
+# 17. AI-Assisted Development Record
 
-The implementation should preserve the prompts used to instruct coding agents.
+The requirements document and this implementation plan form the stable design context supplied to coding agents.
 
-The prompt history should include:
+Each milestone should additionally receive a milestone-specific prompt.
 
-1. the requirements document
-2. this implementation plan
-3. the milestone-specific implementation prompt
-4. any subsequent correction or architectural update provided to the agent
-
-The purpose is to demonstrate that AI was used as an implementation partner under an explicit technical direction rather than as an autonomous architect.
-
-The milestone reports and subsequent revisions to this implementation plan provide the record of how implementation discoveries changed the design.
-
-A final submission should therefore be able to show:
+The intended development record is:
 
 ```text
 Requirements
     ↓
-Implementation Plan
+Implementation Plan Revision 1.0
     ↓
-M0 Prompt
+M0 Agent Prompt
     ↓
-M0 Result / Discovery
+M0 Result / Findings
     ↓
-Updated Plan
+M1 Agent Prompt
     ↓
-M1 Prompt
+M1 Result / Findings
     ↓
-M1 Result / Discovery
+Implementation Plan Revision 1.1
+    ↓
+M2 Agent Prompt
+    ↓
+M2 Result / Findings
+    ↓
+Implementation Plan Revision 1.2
+    ↓
+M2 Agent Prompt updated for runtime testing
+    ↓
+M2 Result / Findings
+    ↓
+Implementation Plan Revision 1.3
+    ↓
+M2 Agent Prompt updated for client UI
+    ↓
+M3 Agent Prompt
     ↓
 ...
 ```
 
-This is the intended development history.
+A plan revision is created whenever requirements or implementation strategy materially changes.
+
+Minor implementation clarifications may increment the revision without changing the architecture.
+
+The prompt history should preserve:
+
+- requirements document
+- applicable implementation-plan revision
+- milestone prompt
+- relevant prior milestone findings
+- subsequent correction/instruction when required
+
+The goal is to demonstrate deliberate AI-assisted engineering:
+
+```text
+Human establishes requirements
+        ↓
+Human establishes architecture
+        ↓
+AI implements bounded milestone
+        ↓
+AI reports evidence and discoveries
+        ↓
+Human evaluates implications
+        ↓
+Plan is revised when warranted
+        ↓
+Next AI agent receives authoritative context
+```
+
+The implementation agents are implementation partners, not autonomous architects.

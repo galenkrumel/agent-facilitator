@@ -1,5 +1,7 @@
-import { useDecisionAgent } from "../hooks/useDecisionAgent.ts";
-import type { DecisionBootstrap, DecisionStatus } from "../../shared/types.ts";
+import { useDecisionAgent, type DecisionConnection } from "../hooks/useDecisionAgent.ts";
+import { OwnerControls } from "../components/OwnerControls.tsx";
+import { SubmissionForm } from "../components/SubmissionForm.tsx";
+import type { DecisionBootstrap, DecisionStatus, InitialSubmission } from "../../shared/types.ts";
 
 /** Participant links land on `/d/:decisionId` once the session is established. */
 export function decisionIdFromPath(pathname: string): string | null {
@@ -26,28 +28,35 @@ export function App() {
 }
 
 function DecisionView({ decisionId }: { decisionId: string }) {
-  const { bootstrap, error } = useDecisionAgent(decisionId);
+  const connection = useDecisionAgent(decisionId);
 
-  if (error) {
+  if (connection.error) {
     return (
       <Shell>
-        <p className="text-red-700">{error}</p>
+        <p className="text-red-700">{connection.error}</p>
       </Shell>
     );
   }
-  if (!bootstrap) {
+  if (!connection.bootstrap) {
     return (
       <Shell>
         <p className="text-neutral-500">Loading the decision…</p>
       </Shell>
     );
   }
-  return <Decision bootstrap={bootstrap} />;
+  return <Decision connection={connection} bootstrap={connection.bootstrap} />;
 }
 
-function Decision({ bootstrap }: { bootstrap: DecisionBootstrap }) {
-  const { decision, viewer, participants, submittedParticipantIds } = bootstrap;
+function Decision({
+  connection,
+  bootstrap
+}: {
+  connection: DecisionConnection;
+  bootstrap: DecisionBootstrap;
+}) {
+  const { decision, viewer, participants, permissions, submittedParticipantIds } = bootstrap;
   const submitted = new Set(submittedParticipantIds);
+  const revealed = decision.status !== "SUBMIT";
 
   return (
     <Shell>
@@ -63,15 +72,17 @@ function Decision({ bootstrap }: { bootstrap: DecisionBootstrap }) {
         )}
       </header>
 
-      <Section title="Options">
-        <ul className="space-y-1">
-          {decision.options.map((option) => (
-            <li key={option.id} className="text-neutral-800">
-              {option.label}
-            </li>
-          ))}
-        </ul>
-      </Section>
+      {!revealed && (
+        <Section title="Options">
+          <ul className="space-y-1">
+            {decision.options.map((option) => (
+              <li key={option.id} className="text-neutral-800">
+                {option.label}
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
 
       <Section title="Participants">
         <ul className="space-y-1">
@@ -85,25 +96,113 @@ function Decision({ bootstrap }: { bootstrap: DecisionBootstrap }) {
                 )}
               </span>
               {/* Who has submitted is public during Submit; what they submitted is not. */}
-              <span className="text-sm text-neutral-500">
-                {submitted.has(participant.id) ? "submitted" : "not yet submitted"}
-              </span>
+              {!revealed && (
+                <span className="text-sm text-neutral-500">
+                  {submitted.has(participant.id) ? "submitted" : "not yet submitted"}
+                </span>
+              )}
             </li>
           ))}
         </ul>
       </Section>
 
-      <Section title="Your position">
-        {bootstrap.ownSubmission ? (
-          <p className="text-neutral-800">
-            {labelOf(bootstrap, bootstrap.ownSubmission.optionId)} · confidence{" "}
-            {bootstrap.ownSubmission.confidence}/5
-          </p>
+      <Section title={revealed ? "Positions" : "Your position"}>
+        {revealed ? (
+          <Positions bootstrap={bootstrap} />
+        ) : permissions.canSubmit ? (
+          <SubmissionForm
+            options={decision.options}
+            busy={connection.busy}
+            error={connection.actionError}
+            onSubmit={connection.submitInitialPosition}
+          />
         ) : (
-          <p className="text-neutral-500">You have not submitted an initial position.</p>
+          <div className="text-neutral-800">
+            {bootstrap.ownSubmission && (
+              <p>
+                {labelOf(bootstrap, bootstrap.ownSubmission.optionId)}
+                <span className="text-neutral-500">
+                  {" "}
+                  · confidence {bootstrap.ownSubmission.confidence}/5
+                </span>
+              </p>
+            )}
+            <Reasons submission={bootstrap.ownSubmission ?? undefined} />
+            <p className="mt-2 text-sm text-neutral-500">
+              Your position is in, and cannot be changed. It stays private until everyone has
+              answered, or the owner declares submissions complete.
+            </p>
+          </div>
         )}
       </Section>
+
+      {permissions.canDeclareSubmissionsComplete && (
+        <Section title="Owner">
+          <OwnerControls
+            outstanding={participants.filter((p) => !submitted.has(p.id)).map((p) => p.displayName)}
+            busy={connection.busy}
+            error={connection.actionError}
+            onDeclareComplete={connection.declareSubmissionsComplete}
+          />
+        </Section>
+      )}
+
+      {revealed && (
+        <p className="mt-8 text-sm text-neutral-500">
+          The discussion opens here in the next milestone.
+        </p>
+      )}
     </Shell>
+  );
+}
+
+/**
+ * Post-Reveal positions. Every participant is listed, including those who never
+ * submitted: they take part in the discussion without an initial position, and
+ * showing them as absent is more honest than leaving them out.
+ */
+function Positions({ bootstrap }: { bootstrap: DecisionBootstrap }) {
+  const submissions = new Map(bootstrap.submissions.map((s) => [s.participantId, s]));
+  const positions = new Map(bootstrap.positions.map((p) => [p.participantId, p]));
+
+  return (
+    <ul className="space-y-4">
+      {bootstrap.participants.map((participant) => {
+        const position = positions.get(participant.id);
+        const submission = submissions.get(participant.id);
+        return (
+          <li key={participant.id}>
+            <p className="text-neutral-900">
+              <span className="font-medium">{participant.displayName}</span>
+              {participant.id === bootstrap.viewer.participantId && " (you)"}
+              {" — "}
+              {position?.optionId ? (
+                <>
+                  {labelOf(bootstrap, position.optionId)}
+                  {position.confidence !== null && (
+                    <span className="text-neutral-500"> · confidence {position.confidence}/5</span>
+                  )}
+                </>
+              ) : (
+                <span className="text-neutral-500">no position submitted</span>
+              )}
+            </p>
+            <Reasons submission={submission} />
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function Reasons({ submission }: { submission: InitialSubmission | undefined }) {
+  if (!submission || submission.reasons.length === 0) return null;
+  return (
+    <ul className="mt-1 list-disc space-y-0.5 pl-5 text-sm text-neutral-700">
+      {submission.reasons.map((reason, i) => (
+        <li key={i}>{reason}</li>
+      ))}
+    </ul>
   );
 }
 

@@ -5,12 +5,14 @@ discusses openly. A neutral AI facilitator helps the team surface conflicting
 assumptions — it does not make the decision, recommend an option, or coach
 participants.
 
-> **Implementation status: M1 (application spine).**
-> The deployment path is in place (M0), and a decision can now be framed,
-> opened through a participant link, and read from SQLite-backed Durable Object
-> state in the browser. The lifecycle itself — submit, reveal, discussion, the
-> facilitator — is built in M2–M8; the full documentation required by M8
-> replaces this file's later sections.
+> **Implementation status: M2 (decision lifecycle).**
+> The deployment path is in place (M0) and a decision can be framed and opened
+> through a participant link (M1). A participant can now submit a private
+> initial position, and the decision reveals — automatically once everyone has
+> answered, or when the owner declares submissions complete — moving from
+> `SUBMIT` to `DISCUSS` and publishing the positions. Discussion, the
+> facilitator, closing and team history are built in M3–M8; the full
+> documentation required by M8 replaces this file's later sections.
 
 ## Architecture (as configured)
 
@@ -147,10 +149,32 @@ token.
 | `npm run deploy` | Build and deploy |
 | `npm run setup` | Validate → types → build → deploy → seed → print URLs |
 | `npm run seed` | Seed the demonstration scenario (M7) |
-| `npm test` | Tests |
+| `npm test` | Tests — both projects |
+| `npm run test:unit` | Pure domain and script tests, in Node |
+| `npm run test:agents` | Agent tests, in the real Workers runtime |
 | `npm run eval` | Facilitator model evaluation (M4) |
 | `npm run types` | Regenerate `env.d.ts` from `wrangler.jsonc` |
 | `npm run check` | Typecheck |
+
+## Tests
+
+Two Vitest projects, because the suites need different runtimes.
+
+`test/unit` is plain Node: pure domain rules (submission validation, the
+authorization table) and the Node-side setup script.
+
+`test/agents` runs **inside workerd**, via `@cloudflare/vitest-pool-workers`,
+against a real Durable Object and its real SQLite. Atomicity, Durable Object
+serialization, race determinism and post-commit Workflow scheduling are claims
+about the runtime, so they are tested in it rather than against a stand-in. The
+`FacilitatorWorkflow` is the one thing doubled — M2 establishes the scheduling
+boundary and M4 supplies the model behind it. Neither project needs Cloudflare
+credentials: the pool runs with remote bindings off.
+
+**Requires npm ≥ 11.** npm 10.9.8 crashes (`Cannot read properties of null
+(reading 'edgesOut')`) resolving Vitest 4's optional peer graph, which
+`@cloudflare/vitest-pool-workers` requires. `npm ci` from the committed
+lockfile is unaffected; a fresh `npm install` on npm 10 is not.
 
 ## Security limitation (intentional, MVP)
 

@@ -3,6 +3,7 @@ import { DECISION_SCHEMA } from "../db/decision-schema.ts";
 import { hashCredential, newCredential } from "../auth/credentials.ts";
 import { newSessionId, readSessionId, SESSION_TTL_MS } from "../auth/sessions.ts";
 import { permissionsFor } from "../domain/decisions.ts";
+import { validateSubmission, type InitialSubmissionInput } from "../domain/submissions.ts";
 import type {
   Confidence,
   CurrentPosition,
@@ -37,6 +38,14 @@ type DecisionRow = {
   revealed_at: number | null;
   closed_at: number | null;
   outcome_option_id: string | null;
+};
+
+type SubmissionRow = {
+  participant_id: string;
+  option_id: string;
+  confidence: number;
+  reasons: string;
+  submitted_at: number;
 };
 
 type ParticipantRow = {
@@ -175,6 +184,127 @@ export class DecisionAgent extends Agent<Env> {
   // -------------------------------------------------------------------------
   // Callable from the browser
 
+  /**
+   * Records the viewer's initial position, revealing the decision if that was
+   * the last one outstanding. Returns the state the browser should now render.
+   */
+  @callable()
+  async submitInitialPosition(input: InitialSubmissionInput): Promise<DecisionBootstrap> {
+    await this.submitFor(this.viewerId(), input);
+    return this.getBootstrap();
+  }
+
+  /** Owner-forced Reveal: Submit has run its course whether or not everyone answered. */
+  @callable()
+  async declareSubmissionsComplete(): Promise<DecisionBootstrap> {
+    await this.declareCompleteFor(this.viewerId());
+    return this.getBootstrap();
+  }
+
+  // -------------------------------------------------------------------------
+  // Lifecycle. Each takes the participant explicitly rather than reading the
+  // connection, so the transactional core can be driven directly by runtime
+  // tests; the `@callable()` shims above are the only authenticated entrance.
+
+  /**
+   * The submission transaction. Everything between the first read and the last
+   * write is synchronous: a Durable Object only interleaves work at an `await`,
+   * so with none here no concurrent call can observe a half-applied submission.
+   * `transactionSync` adds the rollback — a throw anywhere undoes the lot.
+   */
+  async submitFor(participantId: string, input: InitialSubmissionInput): Promise<void> {
+    const revealed = this.ctx.storage.transactionSync(() => {
+      const decision = this.decision();
+      // Also the post-Reveal guard: a submission that arrives after Reveal, or
+      // races one, finds the decision already out of SUBMIT and is rejected.
+      if (decision.status !== "SUBMIT") {
+        throw new Error("Initial submissions are closed — this decision has been revealed.");
+      }
+      const [participant] = this.sql<{ id: string }>`
+        SELECT id FROM participants WHERE id = ${participantId}
+      `;
+      if (!participant) throw new Error("You are not a participant in this decision.");
+      // Belt and braces: initial_submissions.participant_id is also a primary
+      // key, so the invariant holds even if this check were ever skipped.
+      const [existing] = this.sql<{ participant_id: string }>`
+        SELECT participant_id FROM initial_submissions WHERE participant_id = ${participantId}
+      `;
+      if (existing) throw new Error("You have already submitted an initial position.");
+
+      const submission = validateSubmission(decision.options, input);
+      const now = Date.now();
+      this.sql`
+        INSERT INTO initial_submissions (participant_id, option_id, confidence, reasons, submitted_at)
+        VALUES (${participantId}, ${submission.optionId}, ${submission.confidence},
+                ${JSON.stringify(submission.reasons)}, ${now})
+      `;
+
+      // Everyone invited has answered, so Submit has ended on its own. Reveal
+      // rides inside this same transaction: there is no moment at which the
+      // final submission exists but the decision has not moved on.
+      const [outstanding] = this.sql<{ n: number }>`
+        SELECT COUNT(*) AS n FROM participants p
+        WHERE NOT EXISTS (SELECT 1 FROM initial_submissions s WHERE s.participant_id = p.id)
+      `;
+      if (outstanding!.n > 0) return false;
+      this.revealDecision(now);
+      return true;
+    });
+
+    if (revealed) await this.scheduleRevealAnalysis();
+  }
+
+  /**
+   * Owner-forced Reveal. Participation is voluntary, so a participant who has
+   * not submitted must not be able to hold the decision up.
+   */
+  async declareCompleteFor(participantId: string): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      const decision = this.decision();
+      if (decision.ownerParticipantId !== participantId) {
+        throw new Error("Only the owner can declare submissions complete.");
+      }
+      if (decision.status !== "SUBMIT") {
+        throw new Error("This decision has already been revealed.");
+      }
+      this.revealDecision(Date.now());
+    });
+
+    await this.scheduleRevealAnalysis();
+  }
+
+  /**
+   * The canonical SUBMIT → DISCUSS transition. Automatic and owner-forced
+   * Reveal both come through here; there is deliberately no second lifecycle
+   * path to keep in step. The caller supplies the transaction.
+   */
+  private revealDecision(now: number): void {
+    this.sql`UPDATE decisions SET status = ${"DISCUSS"}, revealed_at = ${now}`;
+    // Submitters carry their initial position forward as their current one.
+    // Non-submitters get no row at all: they have no position to hold, and
+    // their initial submission stays absent rather than becoming an empty one.
+    this.sql`
+      INSERT INTO current_positions (participant_id, option_id, confidence, updated_at)
+      SELECT participant_id, option_id, confidence, ${now} FROM initial_submissions
+    `;
+  }
+
+  /**
+   * Hands Reveal analysis to the Workflow — strictly after the transaction has
+   * committed, and strictly outside it. The decision is already in DISCUSS by
+   * the time this runs, so a scheduling failure is logged and swallowed: no AI
+   * problem may undo a transition participants have already been shown.
+   */
+  private async scheduleRevealAnalysis(): Promise<void> {
+    try {
+      await this.env.FACILITATOR_WORKFLOW.create({
+        params: { decisionId: this.name, type: "REVEAL" }
+      });
+    } catch (e) {
+      console.error(`could not schedule Reveal analysis for decision ${this.name}`, e);
+    }
+  }
+
   /** Everything the browser needs to render the decision on connect. */
   @callable()
   getBootstrap(): DecisionBootstrap {
@@ -184,27 +314,17 @@ export class DecisionAgent extends Agent<Env> {
     const viewer = participants.find((p) => p.id === viewerId);
     if (!viewer) throw new Error("unknown participant");
 
-    const [own] = this.sql<{
-      participant_id: string;
-      option_id: string;
-      confidence: number;
-      reasons: string;
-      submitted_at: number;
-    }>`SELECT * FROM initial_submissions WHERE participant_id = ${viewerId}`;
-
-    const ownSubmission: InitialSubmission | null = own
-      ? {
-          participantId: own.participant_id,
-          optionId: own.option_id,
-          confidence: own.confidence as Confidence,
-          reasons: JSON.parse(own.reasons),
-          submittedAt: own.submitted_at
-        }
-      : null;
-
-    const submitted = this.sql<{ participant_id: string }>`
-      SELECT participant_id FROM initial_submissions
-    `;
+    const rows = this.sql<SubmissionRow>`SELECT * FROM initial_submissions ORDER BY submitted_at`;
+    const submissions = rows.map(
+      (r): InitialSubmission => ({
+        participantId: r.participant_id,
+        optionId: r.option_id,
+        confidence: r.confidence as Confidence,
+        reasons: JSON.parse(r.reasons),
+        submittedAt: r.submitted_at
+      })
+    );
+    const ownSubmission = submissions.find((s) => s.participantId === viewerId) ?? null;
 
     const positions = this.sql<{
       participant_id: string;
@@ -219,7 +339,9 @@ export class DecisionAgent extends Agent<Env> {
       participants,
       permissions: permissionsFor(decision, viewer, ownSubmission !== null),
       ownSubmission,
-      submittedParticipantIds: submitted.map((r) => r.participant_id),
+      // Who has submitted is public during Submit; what they submitted is not.
+      submittedParticipantIds: submissions.map((s) => s.participantId),
+      submissions: decision.status === "SUBMIT" ? [] : submissions,
       positions: positions.map(
         (r): CurrentPosition => ({
           participantId: r.participant_id,

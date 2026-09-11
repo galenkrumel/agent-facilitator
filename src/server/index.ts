@@ -18,8 +18,13 @@ export default {
     const [root, decisionId, p, credential] = url.pathname.split("/").filter(Boolean);
 
     if (root === "d") {
-      // Frame a decision. Unauthenticated by design: there are no accounts,
-      // and framing only yields links to the decision you just created.
+      // Frame a decision.
+      //
+      // NOT a product capability: the plan (§4.1) rejects a public
+      // decision-creation endpoint, and M7 replaces this with seed/development
+      // tooling. It survives M2 only because creating a decision is the only
+      // way to exercise Submit → Reveal in a browser, and it is not part of the
+      // application contract — do not build on it.
       // `new` cannot collide with a decision id — those are UUIDs.
       if (decisionId === "new" && request.method === "POST") {
         return frameDecision(request, env, url);

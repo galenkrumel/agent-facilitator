@@ -183,7 +183,9 @@ export type DecisionBootstrap = {
   ownSubmission: InitialSubmission | null;
   /** Who has submitted — never what — is visible during Submit. */
   submittedParticipantIds: string[];
-  /** Empty until Reveal. */
+  /** Empty until Reveal, when every submission becomes a visible historical fact. */
+  submissions: InitialSubmission[];
+  /** Empty until Reveal. Non-submitters never gain an entry. */
   positions: CurrentPosition[];
 };
 

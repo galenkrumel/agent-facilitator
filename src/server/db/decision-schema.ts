@@ -49,9 +49,14 @@ CREATE TABLE IF NOT EXISTS initial_submissions (
   submitted_at INTEGER NOT NULL
 );
 
+-- Only participants who have a position. Reveal seeds it from the initial
+-- submissions, so a participant who never submitted simply has no row: absence
+-- is how "no current position" is represented, not a row full of nulls. The
+-- columns stay nullable for M5, where the facilitator may observe someone
+-- explicitly withdrawing to no position.
 CREATE TABLE IF NOT EXISTS current_positions (
   participant_id TEXT PRIMARY KEY REFERENCES participants(id),
-  option_id TEXT,                      -- null for a participant who never submitted
+  option_id TEXT,
   confidence INTEGER,
   updated_at INTEGER NOT NULL
 );
