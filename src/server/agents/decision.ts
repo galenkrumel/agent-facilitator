@@ -3,14 +3,19 @@ import { DECISION_SCHEMA } from "../db/decision-schema.ts";
 import { hashCredential, newCredential } from "../auth/credentials.ts";
 import { newSessionId, readSessionId, SESSION_TTL_MS } from "../auth/sessions.ts";
 import { permissionsFor } from "../domain/decisions.ts";
+import { validateMessageBody } from "../domain/messages.ts";
 import { validateSubmission, type InitialSubmissionInput } from "../domain/submissions.ts";
+import type { FacilitatorWorkflowParams } from "../workflows/facilitator.ts";
 import type {
   Confidence,
   CurrentPosition,
   Decision,
   DecisionBootstrap,
   DecisionOption,
+  DecisionRealtimeState,
+  FacilitatorStatus,
   InitialSubmission,
+  Message,
   Participant
 } from "../../shared/types.ts";
 
@@ -48,6 +53,13 @@ type SubmissionRow = {
   submitted_at: number;
 };
 
+type MessageRow = {
+  seq: number;
+  author_participant_id: string | null;
+  body: string;
+  created_at: number;
+};
+
 type ParticipantRow = {
   id: string;
   display_name: string;
@@ -70,9 +82,19 @@ const UNAUTHENTICATED = 4401;
  * The Durable Object's single-threaded execution is the serialization
  * boundary — every mutation is decided here, never in the Worker.
  */
-export class DecisionAgent extends Agent<Env> {
+export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
   onStart() {
     this.ctx.storage.sql.exec(DECISION_SCHEMA);
+  }
+
+  /**
+   * The realtime projection is derived from SQLite by this Agent and nothing
+   * else. The Agents SDK also lets a connected client push state; here that
+   * would let one participant announce to every other browser a version SQLite
+   * never produced, so a client-sourced update is refused rather than relayed.
+   */
+  validateStateChange(_next: DecisionRealtimeState, source: Connection | "server"): void {
+    if (source !== "server") throw new Error("the decision projection is read-only");
   }
 
   // -------------------------------------------------------------------------
@@ -119,6 +141,7 @@ export class DecisionAgent extends Agent<Env> {
       `;
     });
     this.sql`INSERT INTO facilitator_meta (id) VALUES (1)`;
+    this.publishProjection();
     return framed;
   }
 
@@ -201,6 +224,13 @@ export class DecisionAgent extends Agent<Env> {
     return this.getBootstrap();
   }
 
+  /** Adds the viewer's message to the one shared discussion thread. */
+  @callable()
+  async postMessage(body: string): Promise<DecisionBootstrap> {
+    await this.postMessageFor(this.viewerId(), body);
+    return this.getBootstrap();
+  }
+
   // -------------------------------------------------------------------------
   // Lifecycle. Each takes the participant explicitly rather than reading the
   // connection, so the transactional core can be driven directly by runtime
@@ -251,7 +281,8 @@ export class DecisionAgent extends Agent<Env> {
       return true;
     });
 
-    if (revealed) await this.scheduleRevealAnalysis();
+    this.publishProjection();
+    if (revealed) await this.scheduleAnalysis("REVEAL");
   }
 
   /**
@@ -270,7 +301,8 @@ export class DecisionAgent extends Agent<Env> {
       this.revealDecision(Date.now());
     });
 
-    await this.scheduleRevealAnalysis();
+    this.publishProjection();
+    await this.scheduleAnalysis("REVEAL");
   }
 
   /**
@@ -290,18 +322,116 @@ export class DecisionAgent extends Agent<Env> {
   }
 
   /**
-   * Hands Reveal analysis to the Workflow — strictly after the transaction has
-   * committed, and strictly outside it. The decision is already in DISCUSS by
-   * the time this runs, so a scheduling failure is logged and swallowed: no AI
-   * problem may undo a transition participants have already been shown.
+   * The message transaction. One shared chronological thread: no replies, no
+   * editing, no deletion, so a message is only ever appended. Synchronous
+   * throughout for the same reason submission is — a Durable Object cannot
+   * interleave without an `await`, so no concurrent call can see half of it.
+   *
+   * The sequence number is allocated by SQLite. `AUTOINCREMENT` never reuses a
+   * number, so the canonical order of the transcript stays stable even across
+   * a rolled-back attempt.
    */
-  private async scheduleRevealAnalysis(): Promise<void> {
+  async postMessageFor(participantId: string, body: string): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      const decision = this.decision();
+      if (decision.status !== "DISCUSS") {
+        throw new Error(
+          decision.status === "SUBMIT"
+            ? "The discussion opens once initial positions are revealed."
+            : "This decision is closed — the discussion is frozen."
+        );
+      }
+      const [participant] = this.sql<{ id: string }>`
+        SELECT id FROM participants WHERE id = ${participantId}
+      `;
+      if (!participant) throw new Error("You are not a participant in this decision.");
+
+      this.sql`
+        INSERT INTO messages (author_participant_id, body, created_at)
+        VALUES (${participantId}, ${validateMessageBody(body)}, ${Date.now()})
+      `;
+    });
+
+    this.publishProjection();
+    // Deliberately last: the facilitator is handed a message that is already
+    // committed and already on everyone's screen. AI is not in the transaction.
+    await this.scheduleAnalysis("DISCUSSION");
+  }
+
+  // -------------------------------------------------------------------------
+  // Realtime
+
+  /**
+   * Synchronises the projection to every connected browser.
+   *
+   * Always after a transaction has returned, never inside one: a broadcast
+   * cannot be rolled back, so a projection published from within a transaction
+   * could describe a decision that never ended up existing.
+   */
+  private publishProjection(): void {
+    this.setState(this.projection());
+  }
+
+  /**
+   * The projection: counts and versions, never content.
+   *
+   * A browser watching this learns only that something moved, and re-reads the
+   * decision from the Agent — so SQLite stays the single authority and no
+   * private detail (an option, a confidence, a message body) rides on the
+   * broadcast. Every version is derived from the rows themselves rather than
+   * kept in a counter, which cannot drift from what was actually committed.
+   */
+  private projection(): DecisionRealtimeState {
+    const decision = this.decision();
+    const [counts] = this.sql<{
+      participants: number;
+      submitted: number;
+      messages: number;
+      messages_version: number;
+      positions_version: number;
+      last_message_at: number | null;
+    }>`
+      SELECT
+        (SELECT COUNT(*) FROM participants) AS participants,
+        (SELECT COUNT(*) FROM initial_submissions) AS submitted,
+        (SELECT COUNT(*) FROM messages) AS messages,
+        (SELECT COALESCE(MAX(seq), 0) FROM messages) AS messages_version,
+        (SELECT COALESCE(MAX(updated_at), 0) FROM current_positions) AS positions_version,
+        (SELECT MAX(created_at) FROM messages) AS last_message_at
+    `;
+    const [meta] = this.sql<{ analysis_running: number; last_error: string | null }>`
+      SELECT analysis_running, last_error FROM facilitator_meta WHERE id = 1
+    `;
+
+    return {
+      status: decision.status,
+      participantCount: counts!.participants,
+      submittedCount: counts!.submitted,
+      messageCount: counts!.messages,
+      messagesVersion: counts!.messages_version,
+      positionsVersion: counts!.positions_version,
+      // M5 owns the board. Nothing has changed it, so it has never moved.
+      boardVersion: 0,
+      facilitatorStatus: facilitatorStatus(meta),
+      // The last thing the team can see happening. Reveal is the first such
+      // moment: before it there is only private submission, which is nobody
+      // else's activity to observe.
+      lastActivityAt: counts!.last_message_at ?? decision.revealedAt
+    };
+  }
+
+  /**
+   * Hands analysis to the Workflow — strictly after the transaction has
+   * committed, and strictly outside it. Whatever the participant did is
+   * durable and already on every screen by the time this runs, so a scheduling
+   * failure is logged and swallowed: no AI problem may undo work participants
+   * have already been shown.
+   */
+  private async scheduleAnalysis(type: FacilitatorWorkflowParams["type"]): Promise<void> {
     try {
-      await this.env.FACILITATOR_WORKFLOW.create({
-        params: { decisionId: this.name, type: "REVEAL" }
-      });
+      await this.env.FACILITATOR_WORKFLOW.create({ params: { decisionId: this.name, type } });
     } catch (e) {
-      console.error(`could not schedule Reveal analysis for decision ${this.name}`, e);
+      console.error(`could not schedule ${type} analysis for decision ${this.name}`, e);
     }
   }
 
@@ -349,7 +479,8 @@ export class DecisionAgent extends Agent<Env> {
           confidence: r.confidence as Confidence | null,
           updatedAt: r.updated_at
         })
-      )
+      ),
+      messages: this.messages()
     };
   }
 
@@ -376,6 +507,26 @@ export class DecisionAgent extends Agent<Env> {
     };
   }
 
+  /**
+   * The whole discussion in sequence order. Short enough to send in full, which
+   * makes the bootstrap a refresh reads and the re-read a realtime update
+   * triggers the same path — so a live browser cannot drift from a refreshed one.
+   */
+  private messages(): Message[] {
+    return this.sql<MessageRow>`
+      SELECT seq, author_participant_id, body, created_at FROM messages ORDER BY seq
+    `.map(
+      (r): Message => ({
+        seq: r.seq,
+        author: r.author_participant_id
+          ? { kind: "PARTICIPANT", participantId: r.author_participant_id }
+          : { kind: "FACILITATOR" },
+        body: r.body,
+        createdAt: r.created_at
+      })
+    );
+  }
+
   private participants(): Participant[] {
     // Owner first, then alphabetical. Framing writes every participant with
     // the same `created_at`, so ordering by it alone breaks ties on UUID —
@@ -391,4 +542,12 @@ export class DecisionAgent extends Agent<Env> {
       lastVisitedAt: r.last_visited_at
     }));
   }
+}
+
+/** M4 maintains `facilitator_meta`; M3 only reports what it says. */
+function facilitatorStatus(
+  meta: { analysis_running: number; last_error: string | null } | undefined
+): FacilitatorStatus {
+  if (meta?.last_error) return "ERROR";
+  return meta?.analysis_running ? "ANALYZING" : "IDLE";
 }

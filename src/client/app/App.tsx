@@ -1,4 +1,6 @@
 import { useDecisionAgent, type DecisionConnection } from "../hooks/useDecisionAgent.ts";
+import { ConnectionStatus } from "../components/ConnectionStatus.tsx";
+import { Discussion } from "../components/Discussion.tsx";
 import { OwnerControls } from "../components/OwnerControls.tsx";
 import { SubmissionForm } from "../components/SubmissionForm.tsx";
 import type { DecisionBootstrap, DecisionStatus, InitialSubmission } from "../../shared/types.ts";
@@ -61,9 +63,12 @@ function Decision({
   return (
     <Shell>
       <header>
-        <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">
-          {STATUS_LABEL[decision.status]}
-        </p>
+        <div className="flex items-baseline justify-between gap-4">
+          <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+            {STATUS_LABEL[decision.status]}
+          </p>
+          <ConnectionStatus status={connection.status} />
+        </div>
         <h1 className="mt-1 text-2xl font-semibold tracking-tight text-neutral-900">
           {decision.question}
         </h1>
@@ -148,9 +153,17 @@ function Decision({
       )}
 
       {revealed && (
-        <p className="mt-8 text-sm text-neutral-500">
-          The discussion opens here in the next milestone.
-        </p>
+        <Section title="Discussion">
+          <Discussion
+            messages={bootstrap.messages}
+            participants={participants}
+            viewerId={viewer.participantId}
+            canPost={permissions.canPostMessage}
+            busy={connection.busy}
+            error={connection.actionError}
+            onPost={connection.postMessage}
+          />
+        </Section>
       )}
     </Shell>
   );

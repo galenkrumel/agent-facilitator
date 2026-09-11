@@ -187,6 +187,34 @@ export type DecisionBootstrap = {
   submissions: InitialSubmission[];
   /** Empty until Reveal. Non-submitters never gain an entry. */
   positions: CurrentPosition[];
+  /** The whole discussion, in sequence order. Empty until Reveal opens it. */
+  messages: Message[];
+};
+
+// ---------------------------------------------------------------------------
+// Realtime
+
+/** Whether asynchronous facilitator analysis is in flight (M4 drives it). */
+export type FacilitatorStatus = "IDLE" | "ANALYZING" | "ERROR";
+
+/**
+ * The small projection the Decision Agent synchronises to every connected
+ * browser. Deliberately counts and versions rather than content: SQLite stays
+ * the authority, and a browser that notices a version move re-reads from it.
+ *
+ * Nothing here is private — a count of submissions is already visible during
+ * Submit, and no message body, option or confidence passes through it.
+ */
+export type DecisionRealtimeState = {
+  status: DecisionStatus;
+  participantCount: number;
+  submittedCount: number;
+  messageCount: number;
+  messagesVersion: number;
+  positionsVersion: number;
+  boardVersion: number;
+  facilitatorStatus: FacilitatorStatus;
+  lastActivityAt: number | null;
 };
 
 // ---------------------------------------------------------------------------

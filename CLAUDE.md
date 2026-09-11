@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Milestones
 
-Work is organised as milestones M0–M8. **M0 (Cloudflare-as-code setup), M1 (application spine) and M2 (decision lifecycle) are complete** — the rest of `src/` is a deployable stub with a comment naming the milestone that fills it in. M3 (discussion + realtime) is next.
+Work is organised as milestones M0–M8. **M0 (Cloudflare-as-code setup), M1 (application spine), M2 (decision lifecycle) and M3 (discussion + realtime) are complete** — the rest of `src/` is a deployable stub with a comment naming the milestone that fills it in. M4 (facilitator foundation) is next.
 
 Before implementing any milestone, read `docs/requirements.md` (what the product must do) and `docs/implementation-plan.md` (how the repo gets there). They are the authority; `README.md` describes only what is built so far.
 
@@ -17,6 +17,7 @@ Before implementing any milestone, read `docs/requirements.md` (what the product
 - `DecisionAgent` (SQLite DO) — transactional authority for one *active* decision.
 - `TeamAgent` (SQLite DO) — *closed* decision history only.
 - `FacilitatorWorkflow` — durable AI execution. Reads state from the Decision Agent; it is **not** a system of record and never owns the transcript.
+- The **realtime projection** (`DecisionRealtimeState`) is derived from SQLite on every read, never accumulated in a counter. It carries counts and versions only; a browser that sees it move re-reads from the Agent.
 
 ## Commands
 
@@ -27,6 +28,8 @@ Before implementing any milestone, read `docs/requirements.md` (what the product
 - **`tsconfig.json` must stay on `"target": "ES2021"`.** ES2022 turns on `useDefineForClassFields`, which silently breaks the `@callable()` TC39 decorator at runtime. Never set `experimentalDecorators`.
 - **`run_worker_first` globs need a segment to match.** `"/d/*"` does not match `/d`, so a bare `/d` request is served by the asset handler and never reaches the Worker — that is why framing is `POST /d/new`.
 - **`POST /d/new` is a development fixture, not a product API.** The plan (§4.1) rejects a public decision-creation endpoint; M7 replaces it with seed tooling. It is guarded by `import.meta.env.DEV`, a build-time constant, so the branch is eliminated from the deployed Worker rather than merely refused there. The Agent's `frameDecision()` RPC stays — that is what M7 seeding will use. Do not build on the route.
+- **`setState()` must happen after the transaction, never inside it.** A broadcast cannot be rolled back, so a projection published from inside `transactionSync` could describe a decision that never committed. Same rule, same reason, as scheduling the Workflow.
+- **`validateStateChange()` is what stops a browser forging the projection.** The Agents SDK relays a client `cf_agent_state` message into agent state by default; the Decision Agent refuses any update whose source is not `"server"`. `setConnectionReadonly()` is *not* the tool for this — it also makes the Agent's own `setState()` throw inside any `@callable()`.
 - **Agent mutations belong in one synchronous `ctx.storage.transactionSync` body.** A Durable Object only interleaves at an `await`, so a sync body cannot be observed half-applied — that, not a lock, is what makes submission and Reveal atomic. `this.sql` is synchronous; keep it that way and schedule Workflows *after* the transaction returns.
 - **Relative imports need the `.ts` extension** (`./agents/decision.ts`) — `verbatimModuleSyntax` + `allowImportingTsExtensions`.
 - **`env.d.ts` is generated and gitignored.** Never hand-edit it. Run `npm run types` after changing any binding in `wrangler.jsonc`.

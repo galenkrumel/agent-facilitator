@@ -1,21 +1,27 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useAgent } from "agents/react";
 import type { DecisionAgent } from "../../server/agents/decision.ts";
 import type { InitialSubmissionInput } from "../../server/domain/submissions.ts";
-import type { DecisionBootstrap } from "../../shared/types.ts";
+import type { DecisionBootstrap, DecisionRealtimeState } from "../../shared/types.ts";
 
 /** The session cookie was missing or expired — the participant link is stale. */
 const UNAUTHENTICATED = 4401;
 
+/** What the browser can say about its live connection to the decision. */
+export type ConnectionStatus = "CONNECTING" | "ONLINE" | "OFFLINE";
+
 export type DecisionConnection = {
   bootstrap: DecisionBootstrap | null;
+  status: ConnectionStatus;
   /** Set when the decision cannot be shown at all. */
   error: string | null;
   /** Why the last action was refused. Cleared when another is attempted. */
   actionError: string | null;
   busy: boolean;
-  submitInitialPosition: (input: InitialSubmissionInput) => void;
-  declareSubmissionsComplete: () => void;
+  /** Each resolves true when the Agent accepted the action. */
+  submitInitialPosition: (input: InitialSubmissionInput) => Promise<boolean>;
+  declareSubmissionsComplete: () => Promise<boolean>;
+  postMessage: (body: string) => Promise<boolean>;
 };
 
 /**
@@ -23,40 +29,49 @@ export type DecisionConnection = {
  *
  * Authentication rides on the session cookie the participant link set, so the
  * connection either opens as a known participant or the Agent closes it.
- * Nothing about the decision is cached client-side: a refresh re-reads it, and
- * every action answers with the state the Agent has just committed rather than
- * anything this hook predicted. Other participants' changes arrive on refresh
- * until M3 adds realtime.
+ *
+ * Nothing about the decision is cached client-side. The Agent synchronises a
+ * small projection — counts and versions, no content — and every move in it
+ * sends this hook back to the Agent for the real state. So a live browser, a
+ * refreshed one and a reconnecting one all arrive at the decision by the same
+ * path, and none of them can drift from what the Agent committed.
  */
 export function useDecisionAgent(decisionId: string): DecisionConnection {
   const [bootstrap, setBootstrap] = useState<DecisionBootstrap | null>(null);
+  const [status, setStatus] = useState<ConnectionStatus>("CONNECTING");
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const fetched = useRef(false);
 
-  const agent = useAgent<DecisionAgent, unknown>({
+  const agent = useAgent<DecisionAgent, DecisionRealtimeState>({
     agent: "DecisionAgent",
     name: decisionId,
     // Retrying an unauthenticated connection would just fail identically.
     shouldReconnectOnClose: (event) => event.code !== UNAUTHENTICATED,
+    onOpen: () => setStatus("ONLINE"),
     onClose: (event) => {
+      setStatus(event.code === UNAUTHENTICATED ? "OFFLINE" : "CONNECTING");
       if (event.code === UNAUTHENTICATED) {
         setError("This decision is not open to you — open your participant link again.");
       }
     }
   });
 
+  // The projection, as a value that changes exactly when the decision does.
+  // Comparing it rather than a timestamp means a reconnect that finds nothing
+  // new costs nothing, while one that missed a message re-reads immediately.
+  const version = JSON.stringify(agent.state ?? null);
+
   useEffect(() => {
-    if (fetched.current) return;
-    fetched.current = true;
-    // The call is buffered until the socket opens; if the Agent rejects the
-    // connection instead, it rejects and `onClose` has the better message.
+    // Also the first read: the effect runs before any projection has arrived,
+    // so the decision loads even if the Agent never broadcasts.
     agent.stub
       .getBootstrap()
       .then(setBootstrap)
-      .catch((e: unknown) => setError((prev) => prev ?? (e instanceof Error ? e.message : String(e))));
-  }, [agent, decisionId]);
+      .catch((e: unknown) =>
+        setError((prev) => prev ?? (e instanceof Error ? e.message : String(e)))
+      );
+  }, [agent, version]);
 
   /**
    * Runs one Agent mutation. A rejection is the Agent refusing the action —
@@ -68,8 +83,10 @@ export function useDecisionAgent(decisionId: string): DecisionConnection {
     setBusy(true);
     try {
       setBootstrap(await action());
+      return true;
     } catch (e: unknown) {
       setActionError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -77,10 +94,12 @@ export function useDecisionAgent(decisionId: string): DecisionConnection {
 
   return {
     bootstrap,
+    status,
     error,
     actionError,
     busy,
-    submitInitialPosition: (input) => void run(() => agent.stub.submitInitialPosition(input)),
-    declareSubmissionsComplete: () => void run(() => agent.stub.declareSubmissionsComplete())
+    submitInitialPosition: (input) => run(() => agent.stub.submitInitialPosition(input)),
+    declareSubmissionsComplete: () => run(() => agent.stub.declareSubmissionsComplete()),
+    postMessage: (body) => run(() => agent.stub.postMessage(body))
   };
 }

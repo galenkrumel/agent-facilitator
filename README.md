@@ -5,13 +5,15 @@ discusses openly. A neutral AI facilitator helps the team surface conflicting
 assumptions — it does not make the decision, recommend an option, or coach
 participants.
 
-> **Implementation status: M2 (decision lifecycle).**
+> **Implementation status: M3 (discussion + realtime).**
 > The deployment path is in place (M0) and a decision can be framed and opened
-> through a participant link (M1). A participant can now submit a private
-> initial position, and the decision reveals — automatically once everyone has
+> through a participant link (M1). A participant submits a private initial
+> position, and the decision reveals — automatically once everyone has
 > answered, or when the owner declares submissions complete — moving from
-> `SUBMIT` to `DISCUSS` and publishing the positions. Discussion, the
-> facilitator, closing and team history are built in M3–M8; the full
+> `SUBMIT` to `DISCUSS` and publishing the positions (M2). The revealed
+> decision now has a live discussion: participants post to one shared
+> chronological thread and see each other's messages without refreshing. The
+> facilitator, closing and team history are built in M4–M8; the full
 > documentation required by M8 replaces this file's later sections.
 
 ## Architecture (as configured)
@@ -91,6 +93,45 @@ participant and take part in the discussion regardless.
 
 Reveal analysis is handed to the Workflow strictly *after* the transaction
 commits. No AI failure can undo a transition participants have already seen.
+
+## Discussion
+
+Once revealed, the decision has one shared thread. Messages are chronological,
+immutable and flat: no nested replies, no `@mentions`, no editing, no deletion.
+Participants address each other by name and correct themselves in a follow-up.
+There is no deadline; the discussion runs until the owner closes the decision
+(M6).
+
+A message's canonical order is its `seq`, allocated by SQLite inside the same
+synchronous transaction that writes it — never the browser's clock. Messages
+carry an author: a participant, or the facilitator, whose messages are a
+visibly different voice in the room. The facilitator writes none until M4, but
+the transcript already distinguishes them.
+
+As with Reveal, discussion analysis is handed to the Workflow strictly after
+the message commits. AI is not part of the message transaction.
+
+## Realtime
+
+The Decision Agent synchronises a small projection — counts and versions, no
+content — to every connected browser through the Agents SDK:
+
+```ts
+{ status, participantCount, submittedCount, messageCount,
+  messagesVersion, positionsVersion, boardVersion,
+  facilitatorStatus, lastActivityAt }
+```
+
+A browser that sees the projection move re-reads the decision from the Agent.
+So the live path and the refresh path are the same read, and SQLite stays the
+single authority: no message body, option or confidence ever rides on the
+broadcast, and a live browser cannot drift from a refreshed one.
+
+Every version is derived from the rows themselves rather than kept in a
+counter, so it cannot describe a state that was never committed. The projection
+is published only after its transaction returns — a broadcast cannot be rolled
+back. The SDK also lets a client push state; the Agent refuses any update that
+did not come from itself.
 
 ## Prerequisites
 
@@ -188,15 +229,15 @@ token.
 
 Two Vitest projects, because the suites need different runtimes.
 
-`test/unit` is plain Node: pure domain rules (submission validation, the
-authorization table) and the Node-side setup script.
+`test/unit` is plain Node: pure domain rules (submission and message
+validation, the authorization table) and the Node-side setup script.
 
 `test/agents` runs **inside workerd**, via `@cloudflare/vitest-pool-workers`,
 against a real Durable Object and its real SQLite. Atomicity, Durable Object
 serialization, race determinism and post-commit Workflow scheduling are claims
 about the runtime, so they are tested in it rather than against a stand-in. The
-`FacilitatorWorkflow` is the one thing doubled — M2 establishes the scheduling
-boundary and M4 supplies the model behind it. Neither project needs Cloudflare
+`FacilitatorWorkflow` is the one thing doubled — M2 and M3 establish the
+scheduling boundary and M4 supplies the model behind it. Neither project needs Cloudflare
 credentials: the pool runs with remote bindings off.
 
 **Requires npm ≥ 11.** npm 10.9.8 crashes (`Cannot read properties of null
