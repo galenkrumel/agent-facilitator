@@ -309,7 +309,7 @@ real Workers AI, so it cannot drift from what the facilitator actually does.
 | ≥1 of 2 implicit conflicts | 2 of 3 runs | 3 of 3 runs |
 | Invented conflicts | 0.3 per run | 0.3 per run |
 | Valid structured output, no retry | 3 of 3 runs | 3 of 3 runs |
-| Latency per analysis | 17–20s | 25–50s |
+| Latency per analysis | 17–20s | 25–70s |
 
 **Llama 3.3 did not meet the bar and the model was switched**, as the
 requirements provide for. Its failure is specific and stable: it reliably finds
@@ -331,7 +331,14 @@ The script exits non-zero when a criterion fails, and prints every intervention
 it produced — neutrality is not something keyword matching can score, so that
 judgement stays with a human reading the output.
 
-M5 added one criterion to it: **no inferred position changes.** Nobody in the
+M5 re-ran it against the wider response the milestone asks the model for, and
+found one thing: at 4096 tokens a run was **truncated mid-array**, which is not
+a shorter analysis but invalid JSON. The budget is now 8192, and three runs
+score 97% recall, 93% attribution, both implicit conflicts in two runs of
+three, valid output in 3 of 3, and no inferred position changes. The model
+selection stands; nothing about it was re-opened.
+
+M5 added one criterion: **no inferred position changes.** Nobody in the
 transcript changes position — Priya says in so many words that she has not — so
 every change reported against it is one the model inferred, and an inferred
 change is the one kind of model error that would rewrite a participant's stated

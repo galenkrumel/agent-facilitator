@@ -33,10 +33,14 @@ export const FACILITATOR_MODEL = "@cf/openai/gpt-oss-120b";
  * a right answer, not a writing task: the facilitator should read the same
  * discussion the same way twice.
  *
- * 4096 tokens because a thorough analysis of a long discussion runs past 2048,
- * and a truncated one is not a shorter analysis — it is invalid JSON.
+ * 8192 tokens because a thorough analysis of a long discussion runs past 2048,
+ * and a truncated one is not a shorter analysis — it is invalid JSON. M5's
+ * larger response — position changes, and an intervention that carries its
+ * issue key — pushed a run past 4096 and produced exactly that: a response cut
+ * off mid-array. Nothing is spent that is not generated, so the headroom is
+ * free except when it is needed.
  */
-export const INFERENCE = { temperature: 0.2, max_tokens: 4096 } as const;
+export const INFERENCE = { temperature: 0.2, max_tokens: 8192 } as const;
 
 /**
  * The shape the model is constrained to emit, for Workers AI structured

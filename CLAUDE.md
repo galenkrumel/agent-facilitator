@@ -49,6 +49,7 @@ Before implementing any milestone, read `docs/requirements.md` (what the product
 
 ## Facilitator (M4)
 
+- **`max_tokens` is 8192, and a truncated response is invalid JSON, not a short answer.** M5's wider response cut a run off mid-array at 4096. If the schema grows again, re-run `npm run eval` and watch the "valid structured output" line before anything else.
 - **The model is `@cf/openai/gpt-oss-120b`, not Llama 3.3.** The requirements name Llama 3.3 *subject to the evaluation*, and it failed it: 57% assumption recall against a bar of 80%, stable across runs. Do not switch back without re-running `npm run eval`.
 - **Workers AI returns structured output already parsed.** In `json_schema` mode `result.response` is an object, not a string — `parseAnalysis()` accepts either, and `completionFrom()` also unwraps the OpenAI-shaped `choices[0].message.content` that the OpenAI models return through the same binding.
 - **OpenAI-shaped models want the schema wrapped.** `response_format.json_schema` must be `{ name, strict, schema }` for them, not the bare schema Workers AI's own models take. `RESPONSE_FORMAT` in `prompt.ts` is the single copy; the Workflow and the eval both use it.
