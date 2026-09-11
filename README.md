@@ -5,16 +5,19 @@ discusses openly. A neutral AI facilitator helps the team surface conflicting
 assumptions — it does not make the decision, recommend an option, or coach
 participants.
 
-> **Implementation status: M3 (discussion + realtime).**
+> **Implementation status: M4 (facilitator foundation).**
 > The deployment path is in place (M0) and a decision can be framed and opened
 > through a participant link (M1). A participant submits a private initial
 > position, and the decision reveals — automatically once everyone has
 > answered, or when the owner declares submissions complete — moving from
 > `SUBMIT` to `DISCUSS` and publishing the positions (M2). The revealed
-> decision now has a live discussion: participants post to one shared
-> chronological thread and see each other's messages without refreshing. The
-> facilitator, closing and team history are built in M4–M8; the full
-> documentation required by M8 replaces this file's later sections.
+> decision has a live discussion: participants post to one shared chronological
+> thread and see each other's messages without refreshing (M3). The facilitator
+> now reads the decision after the Reveal and after each message, and may post
+> a neutral intervention into the thread (M4). The participant-facing board,
+> the Current State Brief, position changes, closing and team history are built
+> in M5–M8; the full documentation required by M8 replaces this file's later
+> sections.
 
 ## Architecture (as configured)
 
@@ -24,7 +27,7 @@ participants.
 | `DecisionAgent` (SQLite Durable Object) | Transactional authority for one active decision. |
 | `TeamAgent` (SQLite Durable Object) | Closed decision history only. |
 | `FacilitatorWorkflow` (Workflow) | Durable AI execution: model invocation, retry, output validation. Not a system of record. |
-| Workers AI (`AI` binding) | Model runtime. The specific model is chosen in M4, after the required model evaluation. |
+| Workers AI (`AI` binding) | Model runtime. `@cf/openai/gpt-oss-120b`, chosen by the model evaluation below. |
 | Static assets | React 19 client (Vite, Tailwind CSS v4), SPA fallback. |
 
 Everything above is declared in `wrangler.jsonc` and provisioned by
@@ -105,8 +108,7 @@ There is no deadline; the discussion runs until the owner closes the decision
 A message's canonical order is its `seq`, allocated by SQLite inside the same
 synchronous transaction that writes it — never the browser's clock. Messages
 carry an author: a participant, or the facilitator, whose messages are a
-visibly different voice in the room. The facilitator writes none until M4, but
-the transcript already distinguishes them.
+visibly different voice in the room.
 
 As with Reveal, discussion analysis is handed to the Workflow strictly after
 the message commits. AI is not part of the message transaction.
@@ -132,6 +134,100 @@ counter, so it cannot describe a state that was never committed. The projection
 is published only after its transaction returns — a broadcast cannot be rolled
 back. The SDK also lets a client push state; the Agent refuses any update that
 did not come from itself.
+
+## The facilitator
+
+The facilitator reads the decision after the Reveal and after each participant
+message, and may post one neutral message into the same thread everyone else
+writes to. It surfaces assumptions, cruxes and conflicts; it does not recommend
+an option, choose an outcome, or coach anyone. Silence is a valid outcome and
+the common one.
+
+Analysis never runs in a participant's request. The Decision Agent commits the
+message or the Reveal first, publishes the projection, and only then schedules
+the Workflow:
+
+```text
+Decision Agent          FacilitatorWorkflow
+  commit  ─────────────▶ read state from the Agent
+  publish                     ↓
+  schedule               Workers AI
+                              ↓
+                         JSON parse → schema → semantic validation
+                              ↓
+  apply  ◀──────────── validated FacilitatorAnalysisResult
+```
+
+The Workflow owns durable execution and nothing else. It reads the decision
+from the Agent rather than carrying a transcript of its own, and the only thing
+it can do with its conclusions is hand them back to be validated and applied.
+
+**AI output is untrusted input.** It is parsed, schema-checked, and then
+checked against the decision itself: participants are named rather than
+identified by UUID and the names must resolve, statuses must be known values,
+lists are bounded, and an intervention is held to the same rules as a
+participant's message. Application is one synchronous transaction, so an
+analysis that still gets something wrong rolls back whole — the facilitator
+cannot leave the decision half-updated. Nothing it returns can bypass a domain
+invariant: it cannot change a position, close a decision, or write as a
+participant.
+
+**One analysis at a time.** The Agent keeps `analysis_running`,
+`analysis_pending` and `last_analyzed_seq`. Messages that arrive during a run
+set `analysis_pending` instead of starting a second one, and the finishing run
+schedules the follow-up. A result whose analyzed range is behind the last
+applied one is refused as stale, and a result that arrives with no run in
+flight — a retried Workflow step — is ignored rather than applied twice. A run
+that dies without reporting loses the slot after five minutes, so one lost
+Workflow cannot silence the facilitator for the life of the decision.
+
+**Failure is survivable by design.** If the model fails, returns something that
+never passes validation, or the Workflow cannot be started at all, the error is
+recorded, the slot is released, and the decision is untouched: messages post,
+the discussion continues, and the next message schedules a fresh analysis.
+Connected browsers see `facilitatorStatus` go to `ERROR`; nothing a participant
+can do is blocked by it.
+
+The facilitator's own messages never schedule analysis — that loop is the whole
+reason the rule exists.
+
+## Model evaluation
+
+The requirements name Llama 3.3 *subject to* an evaluation against a scripted
+transcript. `npm run eval` is that evaluation: forty messages, three
+participants, ten known assumptions, seven conflicts of which two are implicit
+(nobody in the transcript notices them). It runs the product's own prompt,
+decoding parameters and validator — imported from `src/`, not copied — against
+real Workers AI, so it cannot drift from what the facilitator actually does.
+
+| | Llama 3.3 70B | gpt-oss-120b |
+|---|---|---|
+| Assumption recall (bar: 80%) | **57%** | **97%** |
+| Attribution accuracy | 100% | 93% |
+| ≥1 of 2 implicit conflicts | 2 of 3 runs | 3 of 3 runs |
+| Invented conflicts | 0.3 per run | 0.3 per run |
+| Valid structured output, no retry | 3 of 3 runs | 3 of 3 runs |
+| Latency per analysis | 17–20s | 25–50s |
+
+**Llama 3.3 did not meet the bar and the model was switched**, as the
+requirements provide for. Its failure is specific and stable: it reliably finds
+five or six of the ten known assumptions and stops, unchanged by a larger token
+budget or a more explicit prompt. Everything else about it is good — perfect
+attribution, no invented conflicts, reliable structured output — but a
+facilitator that misses half of what a team is assuming is not doing the job.
+`@cf/openai/gpt-oss-120b` is two to three times slower, which costs nothing
+here: analysis is asynchronous and never on a participant's path.
+
+```bash
+npm run eval                    # three runs against the selected model
+npm run eval -- --runs=5
+npm run eval -- --show          # print the first run's analysis in full
+npm run eval -- --model=@cf/…   # score a candidate model
+```
+
+The script exits non-zero when a criterion fails, and prints every intervention
+it produced — neutrality is not something keyword matching can score, so that
+judgement stays with a human reading the output.
 
 ## Prerequisites
 
@@ -221,7 +317,7 @@ token.
 | `npm test` | Tests — both projects |
 | `npm run test:unit` | Pure domain and script tests, in Node |
 | `npm run test:agents` | Agent tests, in the real Workers runtime |
-| `npm run eval` | Facilitator model evaluation (M4) |
+| `npm run eval` | Facilitator model evaluation (needs Cloudflare credentials) |
 | `npm run types` | Regenerate `env.d.ts` from `wrangler.jsonc` |
 | `npm run check` | Typecheck |
 
@@ -230,15 +326,19 @@ token.
 Two Vitest projects, because the suites need different runtimes.
 
 `test/unit` is plain Node: pure domain rules (submission and message
-validation, the authorization table) and the Node-side setup script.
+validation, the authorization table), the facilitator's output validator, and
+the Node-side setup script.
 
 `test/agents` runs **inside workerd**, via `@cloudflare/vitest-pool-workers`,
 against a real Durable Object and its real SQLite. Atomicity, Durable Object
 serialization, race determinism and post-commit Workflow scheduling are claims
 about the runtime, so they are tested in it rather than against a stand-in. The
-`FacilitatorWorkflow` is the one thing doubled — M2 and M3 establish the
-scheduling boundary and M4 supplies the model behind it. Neither project needs Cloudflare
-credentials: the pool runs with remote bindings off.
+`FacilitatorWorkflow` is the one thing doubled: the tests drive the Agent side
+of the boundary directly — claiming and releasing the analysis slot, applying,
+refusing a stale result, rolling back a bad one — while `npm run eval` covers
+the model itself. Neither project needs Cloudflare credentials: the pool runs
+with remote bindings off, which is also why the model is not called from a
+test.
 
 **Requires npm ≥ 11.** npm 10.9.8 crashes (`Cannot read properties of null
 (reading 'edgesOut')`) resolving Vitest 4's optional peer graph, which

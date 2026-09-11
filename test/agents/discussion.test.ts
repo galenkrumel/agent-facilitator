@@ -31,6 +31,19 @@ async function discussing(participants = ["Ada", "Grace"]) {
   const id = Object.fromEntries(framed.map((p) => [p.displayName, p.id]));
   await stubWorkflow(agent);
   await agent.declareCompleteFor(id.Ada!);
+  // The Reveal schedules an analysis, and that analysis holds the single
+  // analysis slot until its Workflow reports back. Stand in for the Workflow
+  // reporting an analysis with nothing to say, so the discussion below starts
+  // from an idle facilitator rather than a coalescing one.
+  await agent.applyAnalysis({
+    analyzedThroughSeq: 0,
+    assumptions: [],
+    cruxes: [],
+    conflicts: [],
+    actionItems: [],
+    positionChanges: [],
+    intervention: null
+  });
   return { agent, id };
 }
 

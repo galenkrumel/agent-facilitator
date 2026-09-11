@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Milestones
 
-Work is organised as milestones M0–M8. **M0 (Cloudflare-as-code setup), M1 (application spine), M2 (decision lifecycle) and M3 (discussion + realtime) are complete** — the rest of `src/` is a deployable stub with a comment naming the milestone that fills it in. M4 (facilitator foundation) is next.
+Work is organised as milestones M0–M8. **M0 (Cloudflare-as-code setup), M1 (application spine), M2 (decision lifecycle), M3 (discussion + realtime) and M4 (facilitator foundation) are complete** — the rest of `src/` is a deployable stub with a comment naming the milestone that fills it in. M5 (decision intelligence: board, cruxes, position changes, brief) is next.
 
 Before implementing any milestone, read `docs/requirements.md` (what the product must do) and `docs/implementation-plan.md` (how the repo gets there). They are the authority; `README.md` describes only what is built so far.
 
@@ -16,7 +16,7 @@ Before implementing any milestone, read `docs/requirements.md` (what the product
 
 - `DecisionAgent` (SQLite DO) — transactional authority for one *active* decision.
 - `TeamAgent` (SQLite DO) — *closed* decision history only.
-- `FacilitatorWorkflow` — durable AI execution. Reads state from the Decision Agent; it is **not** a system of record and never owns the transcript.
+- `FacilitatorWorkflow` — durable AI execution. Reads state from the Decision Agent; it is **not** a system of record and never owns the transcript. It hands results back through `applyAnalysis()`/`failAnalysis()`; the Agent decides whether to apply them.
 - The **realtime projection** (`DecisionRealtimeState`) is derived from SQLite on every read, never accumulated in a counter. It carries counts and versions only; a browser that sees it move re-reads from the Agent.
 
 ## Commands
@@ -41,7 +41,17 @@ Before implementing any milestone, read `docs/requirements.md` (what the product
 - **Don't assert Agent rejections with `expect(...).rejects`.** A Durable Object RPC call returns workerd's pipelining thenable, and that matcher leaves an unhandled rejection which fails the run even though every test passed. `test/agents` uses a `refusedWith()` try/catch helper instead.
 - **Tooling needs npm ≥ 11 and vitest 4.x.** `vitest-pool-workers` peers `vitest@^4`, and npm 10.9.8 crashes (`edgesOut`) resolving vitest 4's peer graph. `npm ci` from the committed lockfile is fine on either.
 - **`scripts/` and `evals/` run under Node's built-in type stripping** (Node ≥ 22.18, no `tsx`), so they must avoid TS that needs emit: enums, namespaces, decorators, parameter properties.
-- **`npm run eval` exits 1 by design** until M4 implements it. Not a broken build.
+- **`npm run eval` needs live Cloudflare credentials** and calls Workers AI over REST from Node. It exits non-zero when a criterion fails — that is a finding, not a broken build.
+
+## Facilitator (M4)
+
+- **The model is `@cf/openai/gpt-oss-120b`, not Llama 3.3.** The requirements name Llama 3.3 *subject to the evaluation*, and it failed it: 57% assumption recall against a bar of 80%, stable across runs. Do not switch back without re-running `npm run eval`.
+- **Workers AI returns structured output already parsed.** In `json_schema` mode `result.response` is an object, not a string — `parseAnalysis()` accepts either, and `completionFrom()` also unwraps the OpenAI-shaped `choices[0].message.content` that the OpenAI models return through the same binding.
+- **OpenAI-shaped models want the schema wrapped.** `response_format.json_schema` must be `{ name, strict, schema }` for them, not the bare schema Workers AI's own models take. `RESPONSE_FORMAT` in `prompt.ts` is the single copy; the Workflow and the eval both use it.
+- **A Durable Object RPC result is `Disposable`, which a Workflow step will not accept as its own return type.** Annotate the callback (`async (): Promise<FacilitatorContext> => agent.getFacilitatorContext()`) rather than casting the result.
+- **`facilitator_meta.analysis_running` is a timestamp, not a flag** — 0 when idle, otherwise when the run claimed the slot. A run that dies without reporting loses the slot after `ANALYSIS_TIMEOUT_MS`.
+- **The facilitator's own message must never schedule analysis.** `postIntervention()` inserts directly for that reason; do not route it through `postMessageFor()`.
+- **`npm run eval` imports the product's prompt and validator from `src/`.** Keep it that way — an evaluation with its own copy of the prompt measures nothing.
 
 ## Git
 

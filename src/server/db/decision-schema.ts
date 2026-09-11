@@ -102,9 +102,14 @@ CREATE TABLE IF NOT EXISTS facilitator_action_items (
   created_at INTEGER NOT NULL
 );
 
--- Single row: AI scheduling/coalescing bookkeeping (M4).
+-- Single row: AI scheduling/coalescing bookkeeping. Only one analysis runs at
+-- a time; messages arriving during one set analysis_pending, and the run that
+-- finishes schedules the follow-up.
 CREATE TABLE IF NOT EXISTS facilitator_meta (
   id INTEGER PRIMARY KEY CHECK (id = 1),
+  -- 0 when idle, otherwise when the in-flight analysis claimed the slot. A
+  -- timestamp rather than a flag so a run that dies without releasing it
+  -- cannot silence the facilitator permanently.
   analysis_running INTEGER NOT NULL DEFAULT 0,
   analysis_pending INTEGER NOT NULL DEFAULT 0,
   last_analyzed_seq INTEGER NOT NULL DEFAULT 0,

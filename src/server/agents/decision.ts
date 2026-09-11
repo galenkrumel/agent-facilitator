@@ -7,12 +7,18 @@ import { validateMessageBody } from "../domain/messages.ts";
 import { validateSubmission, type InitialSubmissionInput } from "../domain/submissions.ts";
 import type { FacilitatorWorkflowParams } from "../workflows/facilitator.ts";
 import type {
+  ActionItem,
   Confidence,
+  Conflict,
+  Crux,
   CurrentPosition,
   Decision,
   DecisionBootstrap,
   DecisionOption,
   DecisionRealtimeState,
+  FacilitatorAnalysisResult,
+  FacilitatorAssumption,
+  FacilitatorContext,
   FacilitatorStatus,
   InitialSubmission,
   Message,
@@ -67,6 +73,24 @@ type ParticipantRow = {
   created_at: number;
   last_visited_at: number | null;
 };
+
+type FacilitatorMetaRow = {
+  /** 0 when idle; otherwise when the in-flight analysis claimed the slot. */
+  analysis_running: number;
+  analysis_pending: number;
+  last_analyzed_seq: number;
+  last_error: string | null;
+};
+
+/**
+ * How long one analysis may hold the single analysis slot.
+ *
+ * The Workflow releases the slot itself, whether it succeeds or fails. This
+ * only covers the case where it never gets to: a Workflow that could not be
+ * created, or an instance that died between steps. Without it one lost run
+ * would silence the facilitator for the life of the decision.
+ */
+const ANALYSIS_TIMEOUT_MS = 5 * 60_000;
 
 /** Per-connection identity, established at connect and kept across hibernation. */
 type ConnectionState = { participantId: string };
@@ -390,6 +414,7 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       messages_version: number;
       positions_version: number;
       last_message_at: number | null;
+      board_version: number;
     }>`
       SELECT
         (SELECT COUNT(*) FROM participants) AS participants,
@@ -397,11 +422,13 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
         (SELECT COUNT(*) FROM messages) AS messages,
         (SELECT COALESCE(MAX(seq), 0) FROM messages) AS messages_version,
         (SELECT COALESCE(MAX(updated_at), 0) FROM current_positions) AS positions_version,
-        (SELECT MAX(created_at) FROM messages) AS last_message_at
+        (SELECT MAX(created_at) FROM messages) AS last_message_at,
+        MAX(
+          (SELECT COALESCE(MAX(updated_at), 0) FROM facilitator_cruxes),
+          (SELECT COALESCE(MAX(created_at), 0) FROM facilitator_action_items)
+        ) AS board_version
     `;
-    const [meta] = this.sql<{ analysis_running: number; last_error: string | null }>`
-      SELECT analysis_running, last_error FROM facilitator_meta WHERE id = 1
-    `;
+    const meta = this.facilitatorMeta();
 
     return {
       status: decision.status,
@@ -410,8 +437,10 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       messageCount: counts!.messages,
       messagesVersion: counts!.messages_version,
       positionsVersion: counts!.positions_version,
-      // M5 owns the board. Nothing has changed it, so it has never moved.
-      boardVersion: 0,
+      // Derived like the others, from the facilitator state the board is
+      // projected out of. M5 adds the projection itself; the version moves as
+      // soon as there is something for it to move for.
+      boardVersion: counts!.board_version,
       facilitatorStatus: facilitatorStatus(meta),
       // The last thing the team can see happening. Reveal is the first such
       // moment: before it there is only private submission, which is nobody
@@ -420,19 +449,310 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
     };
   }
 
+  // -------------------------------------------------------------------------
+  // The facilitator boundary. Analysis is scheduled from here, runs in the
+  // Workflow, and comes back through here to be validated and applied — the
+  // Agent stays the only thing that writes decision state.
+
   /**
    * Hands analysis to the Workflow — strictly after the transaction has
    * committed, and strictly outside it. Whatever the participant did is
    * durable and already on every screen by the time this runs, so a scheduling
-   * failure is logged and swallowed: no AI problem may undo work participants
-   * have already been shown.
+   * failure is recorded and swallowed: no AI problem may undo work
+   * participants have already been shown.
    */
   private async scheduleAnalysis(type: FacilitatorWorkflowParams["type"]): Promise<void> {
+    if (!this.ctx.storage.transactionSync(() => this.claimAnalysisSlot())) {
+      // Coalesced into the run already in flight. It will pick these messages
+      // up when it finishes, so nothing is lost by not starting a second one.
+      this.publishProjection();
+      return;
+    }
+    this.publishProjection();
+
     try {
       await this.env.FACILITATOR_WORKFLOW.create({ params: { decisionId: this.name, type } });
     } catch (e) {
       console.error(`could not schedule ${type} analysis for decision ${this.name}`, e);
+      await this.failAnalysis(e instanceof Error ? e.message : String(e));
     }
+  }
+
+  /**
+   * Takes the single analysis slot, or marks that there is more to analyze.
+   *
+   * Only one analysis runs at a time: concurrent runs would race to write the
+   * same derived state, and each reads the whole transcript anyway, so a second
+   * one would mostly re-read what the first is already reading. Messages that
+   * arrive mid-run set `analysis_pending`, and the finishing run schedules the
+   * follow-up. Synchronous, so the read and the write cannot be interleaved.
+   */
+  private claimAnalysisSlot(): boolean {
+    const meta = this.facilitatorMeta();
+    if (!meta) return false; // no decision has been framed here
+    const now = Date.now();
+    if (meta.analysis_running && now - meta.analysis_running < ANALYSIS_TIMEOUT_MS) {
+      this.sql`UPDATE facilitator_meta SET analysis_pending = 1 WHERE id = 1`;
+      return false;
+    }
+    this.sql`
+      UPDATE facilitator_meta
+      SET analysis_running = ${now}, analysis_pending = 0, last_error = NULL WHERE id = 1
+    `;
+    return true;
+  }
+
+  /**
+   * Everything the facilitator is allowed to read, as one snapshot.
+   *
+   * The Workflow calls this instead of being handed the transcript: state lives
+   * here, and a Workflow that carried the discussion in its own payload would
+   * be a second copy of it that could be resumed with an old one.
+   */
+  async getFacilitatorContext(): Promise<FacilitatorContext> {
+    const decision = this.decision();
+    const meta = this.facilitatorMeta();
+    const submissions = this.submissions();
+
+    return {
+      decision,
+      participants: this.participants(),
+      // The facilitator is blind to initial submissions until the Reveal, in
+      // exactly the way participants are. Analysis is never scheduled during
+      // SUBMIT, so this only ever guards a mistake — but it guards it here,
+      // where the data would otherwise leave the Agent.
+      submissions: decision.status === "SUBMIT" ? [] : submissions,
+      positions: this.positions(),
+      messages: this.messages(),
+      assumptions: this.sql<{
+        id: string;
+        participant_id: string | null;
+        statement: string;
+        source: string;
+        status: string;
+        first_seen_seq: number;
+        updated_at: number;
+      }>`SELECT * FROM facilitator_assumptions ORDER BY first_seen_seq, statement`.map(
+        (r): FacilitatorAssumption => ({
+          id: r.id,
+          participantId: r.participant_id,
+          statement: r.statement,
+          source: r.source as FacilitatorAssumption["source"],
+          status: r.status as FacilitatorAssumption["status"],
+          firstSeenSeq: r.first_seen_seq,
+          updatedAt: r.updated_at
+        })
+      ),
+      cruxes: this.cruxes(),
+      conflicts: this.sql<{
+        id: string;
+        description: string;
+        participant_ids: string;
+        status: string;
+        created_at: number;
+      }>`SELECT * FROM facilitator_conflicts ORDER BY created_at`.map(
+        (r): Conflict => ({
+          id: r.id,
+          description: r.description,
+          participantIds: JSON.parse(r.participant_ids),
+          status: r.status as Conflict["status"],
+          createdAt: r.created_at
+        })
+      ),
+      actionItems: this.actionItems(),
+      meta: {
+        analysisRunning: Boolean(meta?.analysis_running),
+        analysisPending: meta?.analysis_pending === 1,
+        lastAnalyzedSeq: meta?.last_analyzed_seq ?? 0,
+        lastError: meta?.last_error ?? null
+      }
+    };
+  }
+
+  /**
+   * Applies a validated analysis, and releases the analysis slot.
+   *
+   * Returns whether the result was applied. Two things are refused here rather
+   * than in the Workflow, because only the Agent knows them:
+   *
+   * - a result with no run in flight is a duplicate — a retried Workflow step,
+   *   or a result whose slot was reclaimed after its run went missing;
+   * - a result that analyzed less of the transcript than the last applied one
+   *   is stale, and must not overwrite the newer understanding.
+   *
+   * The application itself is one synchronous transaction. Anything the result
+   * still gets wrong — a participant who does not exist, a duplicate id —
+   * throws, and the whole thing rolls back: malformed AI output leaves the
+   * decision exactly as it was.
+   */
+  async applyAnalysis(result: FacilitatorAnalysisResult): Promise<boolean> {
+    const outcome = this.ctx.storage.transactionSync(() => {
+      const meta = this.facilitatorMeta();
+      if (!meta || !meta.analysis_running) return { applied: false, pending: false };
+
+      const stale = result.analyzedThroughSeq < meta.last_analyzed_seq;
+      if (!stale) this.replaceFacilitatorState(result);
+
+      // Everything now in the transcript has been accounted for, including any
+      // message the facilitator just posted — which is why that message does
+      // not become "new discussion" for the next run to react to.
+      const [latest] = this.sql<{ seq: number }>`SELECT COALESCE(MAX(seq), 0) AS seq FROM messages`;
+      this.sql`
+        UPDATE facilitator_meta
+        SET analysis_running = 0,
+            analysis_pending = 0,
+            last_analyzed_seq = ${stale ? meta.last_analyzed_seq : latest!.seq},
+            last_error = NULL
+        WHERE id = 1
+      `;
+      return { applied: !stale, pending: meta.analysis_pending === 1 };
+    });
+
+    this.publishProjection();
+    if (outcome.pending) await this.scheduleAnalysis("DISCUSSION");
+    return outcome.applied;
+  }
+
+  /**
+   * Gives up on the current analysis: the model failed, its output never passed
+   * validation, or the Workflow could not be started. The decision is untouched
+   * — the failure is recorded so the browser can show the facilitator as
+   * degraded, and the slot is freed so the next message can try again.
+   */
+  async failAnalysis(reason: string): Promise<void> {
+    const pending = this.ctx.storage.transactionSync(() => {
+      const meta = this.facilitatorMeta();
+      this.sql`
+        UPDATE facilitator_meta
+        SET analysis_running = 0, analysis_pending = 0, last_error = ${reason.slice(0, 500)}
+        WHERE id = 1
+      `;
+      return meta?.analysis_pending === 1;
+    });
+
+    this.publishProjection();
+    if (pending) await this.scheduleAnalysis("DISCUSSION");
+  }
+
+  /**
+   * Replaces the facilitator's derived state with what the latest analysis
+   * understood, inside the caller's transaction.
+   *
+   * Replaced rather than accumulated: every run re-reads the whole discussion
+   * and returns its current reading of it, so the alternative is merging two
+   * readings of the same messages and slowly collecting near-duplicates of
+   * every assumption the model has ever worded differently. Ids and first-seen
+   * sequences survive for items whose text is unchanged, so a crux that has
+   * been open since message 4 still says so.
+   */
+  private replaceFacilitatorState(result: FacilitatorAnalysisResult): void {
+    const now = Date.now();
+    const known = new Set(this.sql<{ id: string }>`SELECT id FROM participants`.map((r) => r.id));
+    // A participant the analysis invented would otherwise become a row
+    // referencing nobody. The foreign keys would catch it too; this catches it
+    // with a message that says what happened.
+    const participant = (id: string | null): string | null => {
+      if (id !== null && !known.has(id)) throw new Error(`analysis referenced unknown participant ${id}`);
+      return id;
+    };
+    const key = (text: string) => text.trim().toLowerCase();
+
+    const priorAssumptions = new Map(
+      this.sql<{ id: string; statement: string; first_seen_seq: number }>`
+        SELECT id, statement, first_seen_seq FROM facilitator_assumptions
+      `.map((r) => [key(r.statement), r])
+    );
+    this.sql`DELETE FROM facilitator_assumptions`;
+    for (const a of dedupe(result.assumptions, (a) => key(a.statement))) {
+      const prior = priorAssumptions.get(key(a.statement));
+      this.sql`
+        INSERT INTO facilitator_assumptions
+          (id, participant_id, statement, source, status, first_seen_seq, updated_at)
+        VALUES (${prior?.id ?? crypto.randomUUID()}, ${participant(a.participantId)}, ${a.statement},
+                ${a.source}, ${a.status}, ${prior?.first_seen_seq ?? a.firstSeenSeq}, ${now})
+      `;
+    }
+
+    const priorCruxes = new Map(
+      this.sql<{ id: string; question: string; created_at: number }>`
+        SELECT id, question, created_at FROM facilitator_cruxes
+      `.map((r) => [key(r.question), r])
+    );
+    this.sql`DELETE FROM facilitator_cruxes`;
+    for (const c of dedupe(result.cruxes, (c) => key(c.question))) {
+      const prior = priorCruxes.get(key(c.question));
+      this.sql`
+        INSERT INTO facilitator_cruxes (id, question, status, created_at, updated_at)
+        VALUES (${prior?.id ?? crypto.randomUUID()}, ${c.question}, ${c.status},
+                ${prior?.created_at ?? now}, ${now})
+      `;
+    }
+
+    const priorConflicts = new Map(
+      this.sql<{ id: string; description: string; created_at: number }>`
+        SELECT id, description, created_at FROM facilitator_conflicts
+      `.map((r) => [key(r.description), r])
+    );
+    this.sql`DELETE FROM facilitator_conflicts`;
+    for (const c of dedupe(result.conflicts, (c) => key(c.description))) {
+      const prior = priorConflicts.get(key(c.description));
+      c.participantIds.forEach(participant);
+      this.sql`
+        INSERT INTO facilitator_conflicts (id, description, participant_ids, status, created_at)
+        VALUES (${prior?.id ?? crypto.randomUUID()}, ${c.description},
+                ${JSON.stringify(c.participantIds)}, ${c.status}, ${prior?.created_at ?? now})
+      `;
+    }
+
+    const priorItems = new Map(
+      this.sql<{ id: string; description: string; created_at: number }>`
+        SELECT id, description, created_at FROM facilitator_action_items
+      `.map((r) => [key(r.description), r])
+    );
+    this.sql`DELETE FROM facilitator_action_items`;
+    for (const item of dedupe(result.actionItems, (i) => key(i.description))) {
+      const prior = priorItems.get(key(item.description));
+      this.sql`
+        INSERT INTO facilitator_action_items (id, description, owner_participant_id, created_at)
+        VALUES (${prior?.id ?? crypto.randomUUID()}, ${item.description},
+                ${participant(item.ownerParticipantId)}, ${prior?.created_at ?? now})
+      `;
+    }
+
+    // M5 applies `positionChanges`: only an explicit change may move a current
+    // position, and one that omits confidence has to be followed up. Until
+    // then the facilitator does not report them, and could not apply one here
+    // if it did — a current position is a participant's own to state.
+
+    if (result.intervention) this.postIntervention(result.intervention, now);
+  }
+
+  /**
+   * Posts the facilitator's message into the same thread, with no author.
+   *
+   * Deliberately not `postMessageFor`: that schedules analysis, and an
+   * intervention that triggered the analysis that produced the next
+   * intervention would be a facilitator talking to itself.
+   */
+  private postIntervention(body: string, now: number): void {
+    const [last] = this.sql<{ body: string }>`
+      SELECT body FROM messages WHERE author_participant_id IS NULL ORDER BY seq DESC LIMIT 1
+    `;
+    // The crudest possible guard against repeating an intervention: refuse to
+    // say the same thing twice in a row. M5 owns the real question — whether
+    // the underlying issue has materially changed.
+    if (last?.body === body) return;
+    this.sql`
+      INSERT INTO messages (author_participant_id, body, created_at)
+      VALUES (${null}, ${body}, ${now})
+    `;
+  }
+
+  private facilitatorMeta(): FacilitatorMetaRow | undefined {
+    return this.sql<FacilitatorMetaRow>`
+      SELECT analysis_running, analysis_pending, last_analyzed_seq, last_error
+      FROM facilitator_meta WHERE id = 1
+    `[0];
   }
 
   /** Everything the browser needs to render the decision on connect. */
@@ -444,24 +764,8 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
     const viewer = participants.find((p) => p.id === viewerId);
     if (!viewer) throw new Error("unknown participant");
 
-    const rows = this.sql<SubmissionRow>`SELECT * FROM initial_submissions ORDER BY submitted_at`;
-    const submissions = rows.map(
-      (r): InitialSubmission => ({
-        participantId: r.participant_id,
-        optionId: r.option_id,
-        confidence: r.confidence as Confidence,
-        reasons: JSON.parse(r.reasons),
-        submittedAt: r.submitted_at
-      })
-    );
+    const submissions = this.submissions();
     const ownSubmission = submissions.find((s) => s.participantId === viewerId) ?? null;
-
-    const positions = this.sql<{
-      participant_id: string;
-      option_id: string | null;
-      confidence: number | null;
-      updated_at: number;
-    }>`SELECT * FROM current_positions`;
 
     return {
       decision,
@@ -472,14 +776,7 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       // Who has submitted is public during Submit; what they submitted is not.
       submittedParticipantIds: submissions.map((s) => s.participantId),
       submissions: decision.status === "SUBMIT" ? [] : submissions,
-      positions: positions.map(
-        (r): CurrentPosition => ({
-          participantId: r.participant_id,
-          optionId: r.option_id,
-          confidence: r.confidence as Confidence | null,
-          updatedAt: r.updated_at
-        })
-      ),
+      positions: this.positions(),
       messages: this.messages()
     };
   }
@@ -527,6 +824,62 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
     );
   }
 
+  private submissions(): InitialSubmission[] {
+    return this.sql<SubmissionRow>`SELECT * FROM initial_submissions ORDER BY submitted_at`.map(
+      (r): InitialSubmission => ({
+        participantId: r.participant_id,
+        optionId: r.option_id,
+        confidence: r.confidence as Confidence,
+        reasons: JSON.parse(r.reasons),
+        submittedAt: r.submitted_at
+      })
+    );
+  }
+
+  private positions(): CurrentPosition[] {
+    return this.sql<{
+      participant_id: string;
+      option_id: string | null;
+      confidence: number | null;
+      updated_at: number;
+    }>`SELECT * FROM current_positions`.map((r) => ({
+      participantId: r.participant_id,
+      optionId: r.option_id,
+      confidence: r.confidence as Confidence | null,
+      updatedAt: r.updated_at
+    }));
+  }
+
+  private cruxes(): Crux[] {
+    return this.sql<{
+      id: string;
+      question: string;
+      status: string;
+      created_at: number;
+      updated_at: number;
+    }>`SELECT * FROM facilitator_cruxes ORDER BY created_at`.map((r) => ({
+      id: r.id,
+      question: r.question,
+      status: r.status as Crux["status"],
+      createdAt: r.created_at,
+      updatedAt: r.updated_at
+    }));
+  }
+
+  private actionItems(): ActionItem[] {
+    return this.sql<{
+      id: string;
+      description: string;
+      owner_participant_id: string | null;
+      created_at: number;
+    }>`SELECT * FROM facilitator_action_items ORDER BY created_at`.map((r) => ({
+      id: r.id,
+      description: r.description,
+      ownerParticipantId: r.owner_participant_id,
+      createdAt: r.created_at
+    }));
+  }
+
   private participants(): Participant[] {
     // Owner first, then alphabetical. Framing writes every participant with
     // the same `created_at`, so ordering by it alone breaks ties on UUID —
@@ -544,10 +897,23 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
   }
 }
 
-/** M4 maintains `facilitator_meta`; M3 only reports what it says. */
-function facilitatorStatus(
-  meta: { analysis_running: number; last_error: string | null } | undefined
-): FacilitatorStatus {
-  if (meta?.last_error) return "ERROR";
-  return meta?.analysis_running ? "ANALYZING" : "IDLE";
+/**
+ * What the browser is told about the facilitator. `ERROR` is not a failure of
+ * the decision — it means the last analysis did not complete, which the team
+ * can see and ignore, because nothing they can do depends on it.
+ */
+function facilitatorStatus(meta: FacilitatorMetaRow | undefined): FacilitatorStatus {
+  if (meta?.analysis_running) return "ANALYZING";
+  return meta?.last_error ? "ERROR" : "IDLE";
+}
+
+/** First occurrence wins. Two assumptions with the same text are one row. */
+function dedupe<T>(items: T[], key: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const k = key(item);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
