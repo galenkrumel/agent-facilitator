@@ -18,15 +18,16 @@ export default {
     const [root, decisionId, p, credential] = url.pathname.split("/").filter(Boolean);
 
     if (root === "d") {
-      // Frame a decision.
+      // A development fixture, not a product API. The plan (§4.1) rejects a
+      // public decision-creation endpoint; M7 replaces this with seed tooling.
+      // It exists only so Submit → Reveal can be exercised in a browser during
+      // development — do not build anything on it.
       //
-      // NOT a product capability: the plan (§4.1) rejects a public
-      // decision-creation endpoint, and M7 replaces this with seed/development
-      // tooling. It survives M2 only because creating a decision is the only
-      // way to exercise Submit → Reveal in a browser, and it is not part of the
-      // application contract — do not build on it.
+      // `import.meta.env.DEV` is a build-time constant, so this branch is not
+      // merely refused in a deployed Worker: it is eliminated from the bundle,
+      // and the path falls through to the SPA like any other unknown `/d/...`.
       // `new` cannot collide with a decision id — those are UUIDs.
-      if (decisionId === "new" && request.method === "POST") {
+      if (import.meta.env.DEV && decisionId === "new" && request.method === "POST") {
         return frameDecision(request, env, url);
       }
       if (decisionId && !DECISION_ID_PATTERN.test(decisionId)) {

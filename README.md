@@ -31,9 +31,14 @@ provisioning.
 
 ## Framing a decision and opening it
 
-Until the seeded scenario arrives (M7), frame a decision over HTTP. There are
-no accounts, so this is unauthenticated — it only hands back links to the
-decision you just created:
+Framing is **not a product capability.** There is no user-facing way to create
+a decision, and `POST /d/new` is a *development fixture only*: the branch is
+compiled out of the deployed Worker, so on a deployed instance that path falls
+through to the SPA like any other unknown URL. It exists so the lifecycle can
+be exercised locally until the seeded scenario replaces it in M7. Do not build
+on it.
+
+Against the dev server:
 
 ```bash
 curl -X POST http://localhost:5173/d/new \
@@ -63,6 +68,29 @@ WS  /agents/decision-agent/:id     Decision Agent authenticates the cookie,
 The credential stays reusable: opening the same link again — another browser,
 another device, later — mints another session for the same participant. A
 connection without a valid session is closed, not served.
+
+## Submit and Reveal
+
+Each participant submits one private initial position: an option, a confidence
+from 1–5, and up to three reasons. Submissions are one-shot and immutable.
+
+Before Reveal, *who* has submitted is visible; *what* they submitted is not.
+The bootstrap withholds every submission but the viewer's own.
+
+Reveal is the `SUBMIT → DISCUSS` transition, not a phase. It happens when the
+last invited participant submits, or when the owner declares submissions
+complete — both through the same server-side path. Participation is voluntary,
+so the owner can reveal with submissions outstanding; a non-participant must
+not be able to hold the decision up.
+
+At Reveal the submitted positions, confidences and reasons become visible, and
+each submission seeds that participant's **current position** — which is
+authoritative from then on. A participant who never submitted simply has no
+current position: absence of a row, not a row full of nulls. They remain a full
+participant and take part in the discussion regardless.
+
+Reveal analysis is handed to the Workflow strictly *after* the transaction
+commits. No AI failure can undo a transition participants have already seen.
 
 ## Prerequisites
 

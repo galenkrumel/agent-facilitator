@@ -26,7 +26,7 @@ Before implementing any milestone, read `docs/requirements.md` (what the product
 
 - **`tsconfig.json` must stay on `"target": "ES2021"`.** ES2022 turns on `useDefineForClassFields`, which silently breaks the `@callable()` TC39 decorator at runtime. Never set `experimentalDecorators`.
 - **`run_worker_first` globs need a segment to match.** `"/d/*"` does not match `/d`, so a bare `/d` request is served by the asset handler and never reaches the Worker — that is why framing is `POST /d/new`.
-- **`POST /d/new` is not part of the product.** The plan (§4.1) rejects a public decision-creation endpoint; M7 replaces it with seed tooling. It is only still there because M2 needs some way to create a decision to open in a browser. Do not build on it.
+- **`POST /d/new` is a development fixture, not a product API.** The plan (§4.1) rejects a public decision-creation endpoint; M7 replaces it with seed tooling. It is guarded by `import.meta.env.DEV`, a build-time constant, so the branch is eliminated from the deployed Worker rather than merely refused there. The Agent's `frameDecision()` RPC stays — that is what M7 seeding will use. Do not build on the route.
 - **Agent mutations belong in one synchronous `ctx.storage.transactionSync` body.** A Durable Object only interleaves at an `await`, so a sync body cannot be observed half-applied — that, not a lock, is what makes submission and Reveal atomic. `this.sql` is synchronous; keep it that way and schedule Workflows *after* the transaction returns.
 - **Relative imports need the `.ts` extension** (`./agents/decision.ts`) — `verbatimModuleSyntax` + `allowImportingTsExtensions`.
 - **`env.d.ts` is generated and gitignored.** Never hand-edit it. Run `npm run types` after changing any binding in `wrangler.jsonc`.
