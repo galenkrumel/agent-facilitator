@@ -2,7 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { useAgent } from "agents/react";
 import type { DecisionAgent } from "../../server/agents/decision.ts";
 import type { InitialSubmissionInput } from "../../server/domain/submissions.ts";
-import type { DecisionBootstrap, DecisionRealtimeState, StateBrief } from "../../shared/types.ts";
+import type {
+  ClosingAdvisory,
+  DecisionBootstrap,
+  DecisionRealtimeState,
+  StateBrief
+} from "../../shared/types.ts";
 
 /** The session cookie was missing or expired — the participant link is stale. */
 const UNAUTHENTICATED = 4401;
@@ -14,6 +19,8 @@ export type DecisionConnection = {
   bootstrap: DecisionBootstrap | null;
   /** Read once, on opening: reading it is what records the visit. */
   brief: StateBrief | null;
+  /** What the owner is warned about before closing. Null for everyone else. */
+  advisory: ClosingAdvisory | null;
   status: ConnectionStatus;
   /** Set when the decision cannot be shown at all. */
   error: string | null;
@@ -24,6 +31,7 @@ export type DecisionConnection = {
   submitInitialPosition: (input: InitialSubmissionInput) => Promise<boolean>;
   declareSubmissionsComplete: () => Promise<boolean>;
   postMessage: (body: string) => Promise<boolean>;
+  closeDecision: (outcomeOptionId: string) => Promise<boolean>;
 };
 
 /**
@@ -41,6 +49,7 @@ export type DecisionConnection = {
 export function useDecisionAgent(decisionId: string): DecisionConnection {
   const [bootstrap, setBootstrap] = useState<DecisionBootstrap | null>(null);
   const [brief, setBrief] = useState<StateBrief | null>(null);
+  const [advisory, setAdvisory] = useState<ClosingAdvisory | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("CONNECTING");
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -88,6 +97,21 @@ export function useDecisionAgent(decisionId: string): DecisionConnection {
       .catch((e: unknown) => console.error("could not read the current state brief", e));
   }, [agent]);
 
+  // The owner's pre-close warning, re-read whenever the decision moves: it
+  // describes what is still open right now, and an owner deciding whether to
+  // close should not be reading a list from several messages ago. Unlike the
+  // brief, reading it records nothing, so there is no boundary to disturb.
+  const canClose = bootstrap?.permissions.canClose ?? false;
+  useEffect(() => {
+    if (!canClose) return;
+    agent.stub
+      .getClosingAdvisory()
+      .then(setAdvisory)
+      // The close control is right underneath, and it is the thing the owner
+      // came for. A warning that cannot be read is not worth blocking it.
+      .catch((e: unknown) => console.error("could not read the closing advisory", e));
+  }, [agent, canClose, version]);
+
   /**
    * Runs one Agent mutation. A rejection is the Agent refusing the action —
    * already submitted, already revealed, not the owner — and is shown in place
@@ -110,12 +134,14 @@ export function useDecisionAgent(decisionId: string): DecisionConnection {
   return {
     bootstrap,
     brief,
+    advisory,
     status,
     error,
     actionError,
     busy,
     submitInitialPosition: (input) => run(() => agent.stub.submitInitialPosition(input)),
     declareSubmissionsComplete: () => run(() => agent.stub.declareSubmissionsComplete()),
-    postMessage: (body) => run(() => agent.stub.postMessage(body))
+    postMessage: (body) => run(() => agent.stub.postMessage(body)),
+    closeDecision: (outcomeOptionId) => run(() => agent.stub.closeDecision(outcomeOptionId))
   };
 }

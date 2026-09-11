@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Milestones
 
-Work is organised as milestones M0–M8. **M0 (Cloudflare-as-code setup), M1 (application spine), M2 (decision lifecycle), M3 (discussion + realtime), M4 (facilitator foundation) and M5 (decision intelligence) are complete** — the rest of `src/` is a deployable stub with a comment naming the milestone that fills it in. M6 (close + team history) is next.
+Work is organised as milestones M0–M8. **M0 (Cloudflare-as-code setup), M1 (application spine), M2 (decision lifecycle), M3 (discussion + realtime), M4 (facilitator foundation), M5 (decision intelligence) and M6 (close + team history) are complete** — the rest of `src/` is a deployable stub with a comment naming the milestone that fills it in. M7 (seeded demonstration) is next.
+
+The canonical plan is **Revision 1.7**, which the user holds outside the repo; `docs/implementation-plan.md` is still Revision 1.6 and does not describe M6 as built.
 
 Before implementing any milestone, read `docs/requirements.md` (what the product must do) and `docs/implementation-plan.md` (how the repo gets there). They are the authority; `README.md` describes only what is built so far.
 
@@ -15,7 +17,7 @@ Before implementing any milestone, read `docs/requirements.md` (what the product
 ## State ownership
 
 - `DecisionAgent` (SQLite DO) — transactional authority for one *active* decision.
-- `TeamAgent` (SQLite DO) — *closed* decision history only.
+- `TeamAgent` (SQLite DO) — *closed* decision history only. One implicit team in the MVP, addressed by `DEFAULT_TEAM_ID` (`"default"`); there is no team-creation path until M7.
 - `FacilitatorWorkflow` — durable AI execution. Reads state from the Decision Agent; it is **not** a system of record and never owns the transcript. It hands results back through `applyAnalysis()`/`failAnalysis()`; the Agent decides whether to apply them.
 - The **realtime projection** (`DecisionRealtimeState`) is derived from SQLite on every read, never accumulated in a counter. It carries counts and versions only; a browser that sees it move re-reads from the Agent.
 
@@ -46,6 +48,13 @@ Before implementing any milestone, read `docs/requirements.md` (what the product
 - **Don't assert Agent rejections with `expect(...).rejects`.** A Durable Object RPC call returns workerd's pipelining thenable, and that matcher leaves an unhandled rejection which fails the run even though every test passed. `test/agents` uses a `refusedWith()` try/catch helper instead.
 - **Tooling needs npm ≥ 11 and vitest 4.x.** `vitest-pool-workers` peers `vitest@^4`, and npm 10.9.8 crashes (`edgesOut`) resolving vitest 4's peer graph. `npm ci` from the committed lockfile is fine on either.
 - **`scripts/` and `evals/` run under Node's built-in type stripping** (Node ≥ 22.18, no `tsx`), so they must avoid TS that needs emit: enums, namespaces, decorators, parameter properties.
+- **The closing memo's list fields are selections, not compositions.** The prompt hands the model the exact statements in facilitator state and `grounded()` in `parse.ts` drops anything that is not one of them, keeping the facilitator's wording rather than the model's. `closingKnownState()` builds that set for the prompt *and* the validator — one function on purpose, or the model gets asked for something it is then penalised for giving.
+- **The memo never carries a model-supplied outcome.** It is copied from the closed decision, and the closing JSON schema has no field for one. Do not add one "for validation": the guarantee is structural, and a field to check is weaker than a field that does not exist.
+- **`closingMemoStatus` is deliberately not `facilitatorStatus`.** A discussion analysis can still be in flight when the owner closes; the two are unrelated processes and must not share `facilitator_meta.analysis_running`. Closing synthesis does not claim the analysis slot — the memo row's own status is what makes it run once.
+- **`applyAnalysis()` refuses everything once the decision is not `DISCUSS`.** Not "suppress the intervention" — nothing lands, because a closed decision is frozen and the memo is written from what was committed before the close. `failAnalysis()` likewise schedules no follow-up after closing.
+- **Significant learnings are derived, the memo's `refutedAssumptions` are not.** Team history takes assumptions with status `CHALLENGED` or `REFUTED` straight from state; the memo's list is the model's selection from the same set. They can legitimately differ, and that is the point.
+- **The `/team/history/:id` route is verification infrastructure.** Guarded by `import.meta.env.DEV` like `/d/new`, and needs `"/team/*"` in `run_worker_first` or the asset handler swallows it in dev. `TeamAgent.getClosedDecision()` is a plain RPC, never `@callable()` — the Team Agent has no session model.
+- **The brief's "since" boundary is strict (`createdAt > since`).** Tests fast enough to post in the same millisecond as the visit that recorded the boundary see nothing new; `afterTheVisit()` in `intelligence.test.ts` is the fix, not a change to the comparison.
 - **`npm run eval` needs live Cloudflare credentials** and calls Workers AI over REST from Node. It exits non-zero when a criterion fails — that is a finding, not a broken build.
 
 ## Facilitator (M4)

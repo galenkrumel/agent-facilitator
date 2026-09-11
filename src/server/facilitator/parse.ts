@@ -16,10 +16,12 @@
  * Pure, and free of Cloudflare imports: `npm run eval` scores the same
  * validator the product runs.
  */
+import { closingKnownState, dissentingPositions } from "../domain/closing.ts";
 import { MAX_MESSAGE_LENGTH, validateMessageBody } from "../domain/messages.ts";
 import type {
   AssumptionSource,
   AssumptionStatus,
+  ClosingMemo,
   Confidence,
   Conflict,
   FacilitatorAnalysisResult,
@@ -38,7 +40,11 @@ export const LIMITS = {
   cruxes: 10,
   conflicts: 10,
   actionItems: 10,
-  positionChanges: 10
+  positionChanges: 10,
+  /** Per list on the closing memo. */
+  memoItems: 20,
+  /** The memo's reasoning is a few paragraphs, not the transcript again. */
+  reasoning: 4000
 } as const;
 
 /** An issue key is an identifier, not a sentence. */
@@ -187,6 +193,97 @@ export function parseAnalysis(output: unknown, context: FacilitatorContext): Fac
     positionChanges,
     intervention: intervention(value.intervention)
   };
+}
+
+/**
+ * Turns the model's closing synthesis into a `ClosingMemo`, or throws.
+ *
+ * The same four stages as an analysis, with a stricter middle: the memo is the
+ * decision's permanent record, and a record that quietly gained a refuted
+ * assumption nobody ever refuted is worse than no record at all.
+ *
+ * So the three list fields are validated by *grounding* rather than by shape.
+ * The prompt gave the model the exact statements the facilitator recorded and
+ * asked it to copy the ones that matter; each string that comes back is looked
+ * up in that set, and anything that is not there is dropped. What survives is
+ * the statement as the facilitator worded it, not as the model retyped it —
+ * so the memo and the state it was written from cannot drift apart.
+ *
+ * `reasoning` and `dissent` are prose and cannot be checked that way.
+ * `dissent` gets the one check there is: a team whose final positions agree
+ * has no dissent to report, whatever the model wrote. `reasoning` gets none,
+ * and the prompt is what stands behind it — which is worth being honest about
+ * rather than pretending a length check is a grounding check.
+ *
+ * The outcome is never read from `value`. It is copied from the closed
+ * decision, which is what makes it structurally impossible for a memo to
+ * change the outcome the owner declared.
+ */
+export function parseClosingMemo(output: unknown, context: FacilitatorContext): ClosingMemo {
+  const value = typeof output === "string" ? (JSON.parse(extractJson(output)) as unknown) : output;
+  if (!isRecord(value)) throw new Error("the model returned JSON that is not an object");
+
+  const outcomeOptionId = context.decision.outcomeOptionId;
+  // The Agent will refuse the memo anyway; failing here means the Workflow
+  // never spends an inference on a decision that has no outcome to write about.
+  if (!outcomeOptionId) throw new Error("this decision has no declared outcome");
+
+  const known = closingKnownState(context);
+  return {
+    outcomeOptionId,
+    reasoning: prose(value.reasoning, "reasoning"),
+    refutedAssumptions: grounded(value.refutedAssumptions, known.refutedAssumptions, "refutedAssumptions"),
+    unresolvedIssues: grounded(value.unresolvedIssues, known.unresolvedIssues, "unresolvedIssues"),
+    // Dissent has no canonical list to select from, so it is grounded in the
+    // one thing that can be checked: whether the team actually ended up
+    // holding different positions.
+    dissent: dissentingPositions(context.positions).length
+      ? lines(value.dissent, "dissent")
+      : [],
+    actionItems: grounded(value.actionItems, known.actionItems, "actionItems")
+  };
+}
+
+/**
+ * Keeps only the entries that are things the facilitator actually recorded,
+ * in the facilitator's own words.
+ *
+ * Matched on trimmed, case-insensitive text — the model copies strings out of
+ * prose, and a capital letter is not a different assumption. Anything else is
+ * dropped rather than throwing: one reworded line should cost the team that
+ * line, not the whole memo, and a retry would very likely reword it again.
+ */
+function grounded(value: unknown, known: string[], at: string): string[] {
+  const canonical = new Map(known.map((k) => [k.trim().toLowerCase(), k]));
+  const kept = new Map<string, string>();
+
+  for (const raw of (array(value, at, "string") as unknown[]).slice(0, LIMITS.memoItems)) {
+    if (typeof raw !== "string") throw new Error(`${at} must contain strings`);
+    const match = canonical.get(raw.trim().toLowerCase());
+    if (match === undefined) {
+      // Worth a line: a dropped entry is something the model thought belonged
+      // in the permanent record, and its absence is otherwise unexplained.
+      console.log(`dropped an ungrounded ${at} entry: ${raw.slice(0, 120)}`);
+      continue;
+    }
+    kept.set(match, match);
+  }
+  return [...kept.values()];
+}
+
+/** Free prose the model composed. Bounded, and required to be something. */
+function prose(value: unknown, at: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${at} must be a non-empty string`);
+  const trimmed = value.trim();
+  if (trimmed.length > LIMITS.reasoning) throw new Error(`${at} is too long`);
+  return trimmed;
+}
+
+/** A short list of the model's own lines. Bounded per line and per list. */
+function lines(value: unknown, at: string): string[] {
+  return array(value, at, "string")
+    .slice(0, LIMITS.memoItems)
+    .map((raw, i) => statement(raw, `${at}[${i}]`));
 }
 
 /**

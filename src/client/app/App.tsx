@@ -1,5 +1,7 @@
 import { useDecisionAgent, type DecisionConnection } from "../hooks/useDecisionAgent.ts";
 import { Board } from "../components/Board.tsx";
+import { CloseDecision } from "../components/CloseDecision.tsx";
+import { ClosingOutcome } from "../components/ClosingOutcome.tsx";
 import { ConnectionStatus } from "../components/ConnectionStatus.tsx";
 import { CurrentStateBrief } from "../components/CurrentStateBrief.tsx";
 import { Discussion } from "../components/Discussion.tsx";
@@ -61,6 +63,7 @@ function Decision({
   const { decision, viewer, participants, permissions, submittedParticipantIds } = bootstrap;
   const submitted = new Set(submittedParticipantIds);
   const revealed = decision.status !== "SUBMIT";
+  const closed = decision.status === "CLOSED";
 
   return (
     <Shell>
@@ -79,7 +82,19 @@ function Decision({
         )}
       </header>
 
-      {connection.brief && <CurrentStateBrief brief={connection.brief} />}
+      {/* The brief orients a participant in a live discussion. A closed
+          decision is oriented by its outcome, which is right below. */}
+      {connection.brief && !closed && <CurrentStateBrief brief={connection.brief} />}
+
+      {closed && (
+        <Section title="Closed">
+          <ClosingOutcome
+            outcomeOptionId={decision.outcomeOptionId}
+            options={decision.options}
+            record={bootstrap.closingMemo}
+          />
+        </Section>
+      )}
 
       {!revealed && (
         <Section title="Options">
@@ -157,6 +172,18 @@ function Decision({
             busy={connection.busy}
             error={connection.actionError}
             onDeclareComplete={connection.declareSubmissionsComplete}
+          />
+        </Section>
+      )}
+
+      {permissions.canClose && (
+        <Section title="Owner">
+          <CloseDecision
+            options={decision.options}
+            advisory={connection.advisory}
+            busy={connection.busy}
+            error={connection.actionError}
+            onClose={connection.closeDecision}
           />
         </Section>
       )}

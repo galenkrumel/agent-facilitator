@@ -203,7 +203,9 @@ describe("the realtime projection", () => {
       positionsVersion: 0,
       boardVersion: 0,
       facilitatorStatus: "IDLE",
-      lastActivityAt: null
+      lastActivityAt: null,
+      // Nothing until the decision is closed: there is no memo to be waiting on.
+      closingMemoStatus: null
     });
   });
 
@@ -249,7 +251,11 @@ describe("the realtime projection", () => {
     // a browser learns that something moved, then re-reads from the Agent.
     const serialized = JSON.stringify(await projection(agent));
     expect(serialized).not.toMatch(/crash reports/);
-    expect(Object.values(await projection(agent)).every((v) => typeof v !== "object")).toBe(true);
+    // Scalars only — a null is a scalar here; what must never appear is a
+    // structure, because a structure is how content would get in.
+    expect(
+      Object.values(await projection(agent)).every((v) => v === null || typeof v !== "object")
+    ).toBe(true);
   });
 
   it("refuses a projection pushed by a browser", async () => {

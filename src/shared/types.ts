@@ -180,6 +180,26 @@ export type StateBrief = {
   questionsForYou: string[];
 };
 
+/**
+ * What the owner is shown before closing: the things the discussion has left
+ * open. Advisory only — nothing here can prevent or alter a closure, and it
+ * deliberately names no option as the one to take.
+ *
+ * Composed from authoritative state rather than generated, so it is the same
+ * every time it is read and cannot introduce anything the facilitator has not
+ * already recorded. Assumptions and conflicts appear here and nowhere else on
+ * a participant's screen: this is the owner's view of the facilitator's own
+ * working model, at the one moment that model is about to stop mattering.
+ */
+export type ClosingAdvisory = {
+  unresolvedCruxes: Crux[];
+  unresolvedConflicts: Conflict[];
+  /** Assumptions the discussion has challenged or refuted. */
+  challengedAssumptions: FacilitatorAssumption[];
+  /** The deterministic reading of dissent: current positions that differ. */
+  dissentingPositions: PositionView[];
+};
+
 export type Permissions = {
   canSubmit: boolean;
   canPostMessage: boolean;
@@ -214,6 +234,8 @@ export type DecisionBootstrap = {
   board: BoardView;
   /** The whole discussion, in sequence order. Empty until Reveal opens it. */
   messages: Message[];
+  /** Null until the decision is closed; then always present, however it went. */
+  closingMemo: ClosingMemoRecord | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -240,6 +262,16 @@ export type DecisionRealtimeState = {
   boardVersion: number;
   facilitatorStatus: FacilitatorStatus;
   lastActivityAt: number | null;
+  /**
+   * How far the closing synthesis has got. Null until the decision is closed.
+   *
+   * A lifecycle signal, not a second source of truth: the memo itself never
+   * rides on the projection, and a browser that sees this move re-reads the
+   * decision from the Agent like it does for everything else. It is separate
+   * from `facilitatorStatus` on purpose — a discussion analysis can still be
+   * in flight at the moment the owner closes, and the two are unrelated.
+   */
+  closingMemoStatus: ClosingMemoStatus | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -297,6 +329,20 @@ export type FacilitatorAnalysisResult = {
   intervention: Intervention | null;
 };
 
+/**
+ * The closing memo: what the discussion amounted to, written once, around an
+ * outcome the owner has already declared.
+ *
+ * The outcome is not a field the model fills in. It is copied from the closed
+ * decision, so a memo that changed it would have to be a different type — the
+ * requirement that "the facilitator never chooses the outcome" is structural
+ * here rather than a rule something has to check.
+ *
+ * The list fields are the model's *selection* from what the facilitator
+ * already recorded, not its own writing: each entry is matched back against
+ * that state and dropped if it matches nothing. `reasoning` and `dissent` are
+ * prose, and are the only places the model composes anything.
+ */
 export type ClosingMemo = {
   /** The outcome the owner declared. The facilitator cannot alter it. */
   outcomeOptionId: string;
@@ -305,4 +351,43 @@ export type ClosingMemo = {
   unresolvedIssues: string[];
   dissent: string[];
   actionItems: string[];
+};
+
+/** PENDING from the close transaction itself; then one of the other two. */
+export type ClosingMemoStatus = "PENDING" | "READY" | "FAILED";
+
+/**
+ * The memo and how its synthesis went. A failure is reported as a failure: a
+ * closed decision with no memo says so rather than showing invented content,
+ * and the outcome above it is unaffected either way.
+ */
+export type ClosingMemoRecord = {
+  status: ClosingMemoStatus;
+  /** Only ever set when READY, and immutable once it is. */
+  memo: ClosingMemo | null;
+  /** Only ever set when FAILED. */
+  failure: string | null;
+  /** When the owner closed the decision. */
+  requestedAt: number;
+  completedAt: number | null;
+};
+
+/**
+ * One closed decision, as the Team Agent keeps it. Denormalised on purpose:
+ * team history outlives the Decision Agent that produced it, so it carries the
+ * outcome's label rather than an option id only that agent can resolve.
+ */
+export type ClosedDecisionRecord = {
+  decisionId: string;
+  question: string;
+  /** The owner-declared outcome, by label. */
+  outcome: string;
+  closedAt: number;
+  memo: ClosingMemo;
+  /**
+   * What the team learned that outlasts this decision: the assumptions the
+   * discussion challenged or refuted. Derived from authoritative facilitator
+   * state, never from the model — history is not a place for a hypothesis.
+   */
+  significantLearnings: string[];
 };

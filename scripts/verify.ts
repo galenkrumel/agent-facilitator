@@ -19,12 +19,24 @@
  *                                                           # the facilitator
  *   node scripts/verify.ts state  <link>
  *   node scripts/verify.ts watch  <link> <seconds>          # log state pushes
+ *   node scripts/verify.ts advise <link>                    # the owner's
+ *                                                           # pre-close warning
+ *   node scripts/verify.ts close  <link> <optionId>         # declares the
+ *                                                           # outcome, waits
+ *                                                           # for the memo
+ *   node scripts/verify.ts history <decisionId>             # team history
  *
  * A link is the participant URL printed by `frame`. Requires the application
  * to be running (`npm run dev`); `/d/new` exists only in development.
  */
 import { sessionCookieName } from "../src/server/auth/sessions.ts";
-import type { DecisionBootstrap, DecisionRealtimeState, StateBrief } from "../src/shared/types.ts";
+import type {
+  ClosedDecisionRecord,
+  ClosingAdvisory,
+  DecisionBootstrap,
+  DecisionRealtimeState,
+  StateBrief
+} from "../src/shared/types.ts";
 
 const [command, ...args] = process.argv.slice(2);
 
@@ -134,6 +146,10 @@ function render(bootstrap: DecisionBootstrap): string {
     ...bootstrap.board.cruxes.map((c) => `  [${c.status}] ${c.question}`),
     `action items:${bootstrap.board.actionItems.length ? "" : " (none)"}`,
     ...bootstrap.board.actionItems.map((a) => `  ${a.description}`),
+    ...(bootstrap.decision.status === "CLOSED"
+      ? [`outcome: ${label(bootstrap.decision.outcomeOptionId)} (declared by the owner)`]
+      : []),
+    ...renderMemo(bootstrap),
     `messages (${bootstrap.messages.length}):`,
     ...bootstrap.messages.map((m) => {
       const author = m.author;
@@ -155,6 +171,43 @@ function renderBrief(brief: StateBrief): string {
     ...brief.openCruxes.map((c) => `  open crux: ${c}`),
     ...brief.challengedAssumptions.map((a) => `  challenged: ${a}`)
   ].join("\n");
+}
+
+/** The closing memo, as far as it has got. */
+function renderMemo(bootstrap: DecisionBootstrap): string[] {
+  const record = bootstrap.closingMemo;
+  if (!record) return [];
+  if (!record.memo) return [`closing memo: ${record.status}${record.failure ? ` — ${record.failure}` : ""}`];
+
+  const list = (title: string, items: string[]) =>
+    items.length ? [`  ${title}:`, ...items.map((i) => `    ${i}`)] : [];
+  return [
+    "closing memo: READY",
+    `  reasoning: ${record.memo.reasoning}`,
+    ...list("refuted assumptions", record.memo.refutedAssumptions),
+    ...list("unresolved", record.memo.unresolvedIssues),
+    ...list("dissent", record.memo.dissent),
+    ...list("action items", record.memo.actionItems)
+  ];
+}
+
+/**
+ * Waits for the closing memo to stop being pending.
+ *
+ * The projection is how the application itself says the synthesis has landed,
+ * exactly as `facilitatorStatus` is for analysis — so this waits on the same
+ * signal a browser does, rather than on a guess about how long a model takes.
+ */
+async function settleMemo(client: Client, timeoutMs = 180_000): Promise<DecisionRealtimeState> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = client.pushes.at(-1)?.state;
+    if (state && state.closingMemoStatus !== null && state.closingMemoStatus !== "PENDING") {
+      return state;
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error("the closing memo never settled");
 }
 
 switch (command) {
@@ -230,16 +283,71 @@ switch (command) {
     await new Promise((r) => setTimeout(r, seconds * 1000));
     for (const push of client.pushes) {
       console.log(
-        `  +${((push.at - started) / 1000).toFixed(1)}s  messages=${push.state.messageCount} ` +
-          `board=${push.state.boardVersion} positions=${push.state.positionsVersion} ` +
-          `facilitator=${push.state.facilitatorStatus}`
+        `  +${((push.at - started) / 1000).toFixed(1)}s  ${push.state.status} ` +
+          `messages=${push.state.messageCount} board=${push.state.boardVersion} ` +
+          `positions=${push.state.positionsVersion} facilitator=${push.state.facilitatorStatus} ` +
+          `memo=${push.state.closingMemoStatus ?? "-"}`
       );
     }
     client.close();
     break;
   }
 
+  case "advise": {
+    const client = await connect(args[0]!);
+    const warning = await client.call<ClosingAdvisory>("getClosingAdvisory");
+    console.log(
+      [
+        `unresolved cruxes:${warning.unresolvedCruxes.length ? "" : " (none)"}`,
+        ...warning.unresolvedCruxes.map((c) => `  ${c.question}`),
+        `unresolved conflicts:${warning.unresolvedConflicts.length ? "" : " (none)"}`,
+        ...warning.unresolvedConflicts.map((c) => `  ${c.description}`),
+        `challenged assumptions:${warning.challengedAssumptions.length ? "" : " (none)"}`,
+        ...warning.challengedAssumptions.map((a) => `  [${a.status}] ${a.statement}`),
+        `dissent:${warning.dissentingPositions.length ? "" : " (the team has converged)"}`,
+        ...warning.dissentingPositions.map((p) => `  ${p.displayName}`)
+      ].join("\n")
+    );
+    client.close();
+    break;
+  }
+
+  case "close": {
+    const [link, outcomeOptionId] = args;
+    const client = await connect(link!);
+    const closed = await client.call<DecisionBootstrap>("closeDecision", [outcomeOptionId]);
+    console.log(render(closed));
+
+    // The memo is written afterwards, by a Workflow. Waiting for the
+    // projection to move is how a browser learns it has landed.
+    const settled = await settleMemo(client);
+    console.log(`\nclosing memo: ${settled.closingMemoStatus}`);
+    console.log(render(await client.call<DecisionBootstrap>("getBootstrap")));
+    console.log(`\npushes received: ${client.pushes.length}`);
+    client.close();
+    break;
+  }
+
+  case "history": {
+    const response = await fetch(`http://localhost:5173/team/history/${args[0]}`);
+    if (!response.ok) throw new Error(`team history returned ${response.status}`);
+    const record = (await response.json()) as ClosedDecisionRecord;
+    console.log(
+      [
+        `decision: ${record.question}`,
+        `outcome: ${record.outcome}`,
+        `closed at: ${new Date(record.closedAt).toLocaleString()}`,
+        `memo reasoning: ${record.memo.reasoning}`,
+        `significant learnings:${record.significantLearnings.length ? "" : " (none)"}`,
+        ...record.significantLearnings.map((l) => `  ${l}`)
+      ].join("\n")
+    );
+    break;
+  }
+
   default:
-    console.error("usage: node scripts/verify.ts frame|brief|submit|say|state|watch …");
+    console.error(
+      "usage: node scripts/verify.ts frame|brief|submit|say|state|watch|advise|close|history …"
+    );
     process.exit(1);
 }
