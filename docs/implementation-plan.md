@@ -1,5 +1,5 @@
 # Async Decision Facilitator
-## Repo-Level Implementation Plan — Revision 1.5
+## Repo-Level Implementation Plan — Revision 1.6
 
 ## Revision History
 
@@ -11,6 +11,7 @@
 | **1.3** | Explicitly assigned the minimum submission/owner UI to M2. M2 now delivers the Submit → Reveal experience end-to-end in the browser; M3 owns the discussion UI and realtime discussion experience |
 | **1.4** | Incorporated M2 implementation findings: `/d/new` is development-only and eliminated from production bundles; absence of a `current_positions` row represents no current position; revealed initial submissions are exposed through bootstrap after Reveal; Workers-runtime and transport-level verification are complete; M3 owns realtime and M8 owns visual/E2E verification |
 | **1.5** | Incorporated M3 implementation findings: realtime state remains a non-authoritative projection; client-originated Agent state must be validated and cannot override SQLite; projection updates are followed by authoritative reads; M3 discussion/realtime implementation is complete |
+| **1.6** | Incorporated M4 model evaluation and facilitator findings: Llama 3.3 failed the required evaluation and was replaced by `gpt-oss-120b`; the facilitator now persistently applies validated AI state; M5 explicitly owns meaningful intervention selectivity; evaluation rubric revisions must remain part of the development record |
 
 ---
 
@@ -49,7 +50,7 @@ The following decisions are established unless implementation evidence demonstra
 - Workflow coordinates AI processing but does not own decision state.
 - Agents SDK provides application backend/RPC and realtime synchronization.
 - Worker remains thin.
-- Workers AI is the initial model runtime.
+- Workers AI is the model runtime.
 - There is no conventional REST API unless a concrete platform requirement emerges.
 - Board state is a projection, not a generic persistence model.
 - Participant identity is based on persistent bearer credentials.
@@ -136,7 +137,22 @@ Clients must never be able to establish or overwrite authoritative decision stat
 
 When correctness matters, the application may re-read authoritative state from SQLite after a realtime update rather than attempting to reconstruct correctness from client-visible state.
 
-## 2.7 Milestones should produce vertical slices
+## 2.7 AI-derived state is never authoritative by default
+
+AI output is an observation or proposed state change.
+
+It must be validated before being applied to authoritative state.
+
+The Decision Agent remains the sole authority for:
+
+- whether a proposed facilitator state change is valid
+- whether it is consistent with current state
+- whether it can be persisted
+- whether it can affect participant-visible state
+
+The facilitator cannot bypass domain invariants.
+
+## 2.8 Milestones should produce vertical slices
 
 When a milestone introduces user-visible behavior, it should include the minimum client UI required to exercise that behavior end-to-end.
 
@@ -144,7 +160,7 @@ Later milestones own their own richer UX.
 
 The goal is not to build the entire UI early; it is to avoid creating server functionality that cannot be exercised through the actual application.
 
-## 2.8 No silent scope expansion
+## 2.9 No silent scope expansion
 
 Do not add:
 
@@ -253,35 +269,23 @@ Known limitations
 
 ---
 
-# 4. Settled Decisions from M1–M3
+# 4. Settled Decisions from M1–M4
 
 ## 4.1 Decision creation is not currently a public product capability
 
-M1 introduced:
-
-```text
-POST /d/new
-```
-
-to satisfy the practical need to create a decision.
+M1 introduced `/d/new` to satisfy the practical need to create a decision.
 
 This was rejected as a product capability.
 
 The M2 implementation retains the route only as a development-only fixture guarded by a build-time development constant. Its handler is eliminated from the production bundle.
 
-A deployed instance therefore does not expose `/d/new` as a decision-creation endpoint.
-
-For development and demonstration purposes, decisions may be created through seed/development tooling.
+A deployed instance does not expose `/d/new` as a decision-creation endpoint.
 
 M7 must replace the development creation path with the normal seeded demonstration scenario.
-
-If a user-facing decision-creation experience is later desired, it must be explicitly added to the requirements and implementation plan.
 
 ### Rejected decision
 
 Do not preserve `/d/new` as a deployed product API.
-
-Do not build additional functionality around it.
 
 ---
 
@@ -318,14 +322,6 @@ The persistent participant link is the durable identity credential.
 
 The browser session is temporary authentication state.
 
-```text
-Persistent participant link
-        ↓
-browser session cookie
-        ↓
-authenticated Agent interaction
-```
-
 The persistent link:
 
 - does not expire automatically
@@ -340,33 +336,23 @@ The session:
 
 Losing the persistent link means there is no account-recovery mechanism.
 
-A session store is an acceptable implementation detail.
-
 ---
 
 ## 4.4 Frame is conceptual, not persisted
 
-The product lifecycle is described as:
+The product lifecycle is:
 
 ```text
 Frame → Submit → Discuss → Close
 ```
 
-But `Frame` is the act of creating/configuring the decision.
-
-The persisted decision state is:
+The persisted state is:
 
 ```text
 SUBMIT → DISCUSS → CLOSED
 ```
 
-A newly created decision enters `SUBMIT`.
-
 There is no persisted `FRAME` status.
-
-### Rejected decision
-
-Do not add `FRAME` to `DecisionStatus` merely to mirror the conceptual product lifecycle.
 
 ---
 
@@ -382,25 +368,17 @@ no row
 no current position
 ```
 
-The nullable columns remain available for future explicit withdrawal semantics in M5, but M2 does not implement withdrawal.
+Nullable columns remain available for future explicit withdrawal semantics.
 
 ---
 
 ## 4.6 Initial submissions become visible after Reveal
-
-`DecisionBootstrap` includes initial submissions.
 
 Before Reveal:
 
 ```text
 initialSubmissions = []
 ```
-
-Participants can see that submissions exist but cannot see another participant's:
-
-- selected option
-- confidence
-- reasons
 
 After Reveal:
 
@@ -414,192 +392,174 @@ Initial submissions remain historical context after Reveal.
 
 ## 4.7 Realtime state is a projection
 
-The Agents SDK realtime state contains a small projection:
+Agents SDK realtime state is a small projection derived from authoritative SQLite state.
 
-```ts
-interface DecisionRealtimeState {
-  status: DecisionStatus;
-  participantCount: number;
-  submittedCount: number;
-  messageCount: number;
-  messagesVersion: number;
-  positionsVersion: number;
-  boardVersion: number;
-  facilitatorStatus: FacilitatorStatus;
-  lastActivityAt: number | null;
-}
+Client-originated realtime state cannot override SQLite.
+
+When correctness matters, authoritative state is re-read rather than inferred from client state.
+
+---
+
+## 4.8 Selected AI model
+
+The initial candidate model, Llama 3.3, was evaluated against the required facilitator transcript.
+
+Results:
+
+```text
+Llama 3.3
+Assumption recall: 57%
+Required: ≥80%
+Result: FAIL
 ```
 
-The projection is derived from authoritative SQLite state.
+A larger token budget and sharper prompt did not materially improve the result.
 
-Version/counter fields are not independently authoritative state.
+The model was therefore rejected for the facilitator.
 
-Client-originated state updates must be validated and cannot be allowed to create state that SQLite does not support.
+The selected model is:
 
-The application may re-read authoritative state after a realtime change. This keeps the live path and refresh path based on the same source of truth.
+```text
+@cf/openai/gpt-oss-120b
+```
+
+Evaluation results:
+
+```text
+Assumption recall: 97%
+Attribution: 93%
+Implicit conflict detection: 3/3 runs
+Invented conflicts: 0
+Structured output: valid across evaluated runs
+```
+
+The selected model should remain the default unless later implementation evidence demonstrates a material problem.
+
+Do not repeatedly re-run expensive model selection exercises without new evidence.
+
+---
+
+## 4.9 Facilitator state is persistently applied in M4
+
+M4 implements the complete validated state pipeline:
+
+```text
+LLM
+ ↓
+parse
+ ↓
+schema validation
+ ↓
+semantic validation
+ ↓
+transactional application
+ ↓
+Decision Agent SQLite
+```
+
+M4 persists:
+
+- assumptions
+- cruxes
+- conflicts
+- action items
+- facilitator status
+- interventions
+
+M5 owns the participant-facing board projection, Current State Brief, position changes, and intervention selectivity.
+
+---
+
+## 4.10 Evaluation methodology is part of the development record
+
+The facilitator evaluation uses the product's actual prompt and validator rather than independent evaluation logic.
+
+If evaluation reveals that a rubric is overly lexical and fails to recognize semantically valid model behavior, the rubric may be revised.
+
+Such revisions must be disclosed in the milestone report and preserved in the development record.
+
+The goal is to measure substantive facilitator behavior rather than keyword overlap.
 
 ---
 
 # 5. Milestone Overview
 
-| Milestone | Objective | Exit condition |
+| Milestone | Objective | Status |
 |---|---|---|
-| **M0** | Cloudflare-as-code setup | One-command deployment works |
-| **M1** | Application spine | Real Decision Agent can bootstrap a decision |
-| **M2** | Decision lifecycle | Submit → Reveal works correctly, is directly runtime-tested, and can be exercised end-to-end through the browser transport path |
-| **M3** | Discussion | Realtime chronological discussion works |
-| **M4** | Facilitator foundation | AI can analyze Reveal/discussion safely |
-| **M5** | Decision intelligence | Board, cruxes, position changes, brief work |
-| **M6** | Closing + history | Owner closes and Team Agent stores result |
-| **M7** | Seeded demo | Fresh deployment is immediately demonstrable |
-| **M8** | Hardening | Comprehensive tests, visual/E2E verification, evaluation, failure handling, README complete |
+| **M0** | Cloudflare-as-code setup | **Complete** |
+| **M1** | Application spine | **Complete** |
+| **M2** | Decision lifecycle | **Complete** |
+| **M3** | Discussion + realtime | **Complete** |
+| **M4** | Facilitator foundation | **Complete** |
+| **M5** | Decision intelligence | Next |
+| **M6** | Closing + history | Pending |
+| **M7** | Seeded demo | Pending |
+| **M8** | Hardening | Pending |
 
 ---
 
 # 6. M0 — Cloudflare-as-Code Setup
 
-M0 is complete.
+Complete.
 
 ---
 
 # 7. M1 — Application Spine
 
-M1 is complete.
+Complete.
 
 ---
 
 # 8. M2 — Decision Lifecycle
 
-M2 is complete.
-
-It established:
-
-- initial submissions
-- automatic Reveal
-- owner-forced Reveal
-- transactional lifecycle
-- current-position initialization
-- submission privacy
-- post-Reveal submission visibility
-- post-Reveal Workflow scheduling boundary
-- minimum submission/owner UI
-- Workers-runtime test infrastructure
-- runtime transaction/race verification
+Complete.
 
 ---
 
 # 9. M3 — Discussion + Realtime
 
-M3 is complete.
+Complete.
 
-## Objective
+M3 established:
 
-Implement the live asynchronous discussion experience.
-
-## Message model
-
-Messages are:
-
-- chronological
-- immutable
-- flat
-- assigned canonical sequence numbers
-
-No:
-
-- nested replies
-- editing
-- deletion
-- explicit mentions
-
-## `postMessage()`
-
-The operation:
-
-1. authenticates participant
-2. verifies `DISCUSS`
-3. validates message
-4. allocates sequence
-5. inserts message
-6. commits
-7. updates realtime projection
-8. schedules facilitator analysis
-
-AI is not part of the message transaction.
-
-## Realtime
-
-Use Agents SDK realtime state synchronization.
-
-Maintain only small projection state.
-
-Historical messages remain in SQLite.
-
-A realtime state update is never treated as authoritative merely because it arrived through the Agent connection.
-
-## Client UI
-
-Implement:
-
-- discussion display
-- message composer
-- connection status
-
-The discussion UI is responsible for rendering current state but does not become a second persistence mechanism.
-
-## Concurrency
-
-Decision Agent is the serialization boundary.
-
-M3 verifies:
-
-- multiple participant sessions
-- simultaneous discussion activity
-- discussion vs. Reveal
-- refresh/reconstruction from SQLite
-- realtime delivery without manual refresh
-- client-originated projection tampering is rejected
-
-The message-vs-close race is deferred to M6 because close does not exist yet.
-
-## Acceptance criteria
-
-Two browser sessions can participate simultaneously.
-
-A committed message becomes visible to another connected participant without manual refresh.
-
-A refresh reconstructs discussion from authoritative SQLite state.
-
-Client-originated realtime state cannot override authoritative state.
+- chronological discussion
+- immutable messages
+- canonical sequence numbers
+- realtime projection
+- live multi-session updates
+- authoritative SQLite reads
+- client-state validation
+- post-commit facilitator scheduling
 
 ---
 
 # 10. M4 — Facilitator Foundation
 
+Complete.
+
 ## Objective
 
-Introduce AI safely and prove the model is adequate before substantial facilitator implementation.
+Introduce AI safely and establish the facilitator execution pipeline.
 
 ## Model evaluation
 
-Before full facilitator implementation, run the scripted approximately 40-message transcript.
+M4 evaluated the initial Workers AI model against the scripted approximately 40-message transcript.
 
-Measure:
+Llama 3.3 failed the required ≥80% assumption-recall threshold.
 
-- ≥80% assumption identification
-- correct participant attribution
-- valid structured output
-- detection of at least one of two implicit conflicts
+`@cf/openai/gpt-oss-120b` passed with:
+
+- 97% assumption recall
+- 93% attribution
+- implicit conflict detected in 3/3 runs
 - no invented conflicts
-- reliable output formatting
+- valid structured output
 
-If the initial Llama 3.3 model is inadequate, evaluate another model before continuing.
-
-Verify actual Workers AI inference and resolve the remaining model-binding/permission question.
+`gpt-oss-120b` is now the selected facilitator model.
 
 ## Facilitator pipeline
 
-Implement:
+The pipeline is:
 
 ```text
 FacilitatorContext
@@ -608,80 +568,91 @@ prompt
     ↓
 Workers AI
     ↓
-JSON parse
+JSON extraction/parsing
     ↓
 schema validation
     ↓
 semantic validation
     ↓
-FacilitatorAnalysisResult
+transactional Decision Agent application
 ```
 
 ## Workflow
 
-Implement:
+M4 implements the durable facilitator Workflow path for:
 
 ```text
 REVEAL
 DISCUSSION
-CLOSING
 ```
 
-Workflow input:
+The CLOSING route may exist structurally, but closing behavior remains M6.
 
-```ts
-interface FacilitatorWorkflowInput {
-  decisionId: string;
-  type: FacilitatorWorkflowType;
-}
-```
+The Workflow:
 
-The Workflow retrieves current state from Decision Agent.
+1. reads state from Decision Agent
+2. invokes the model
+3. parses output
+4. validates output
+5. applies validated result
 
-It does not receive or own the transcript.
+The Workflow does not own decision state.
 
 ## Discussion coalescing
 
-Decision Agent maintains:
-
-```text
-analysisRunning
-analysisPending
-lastAnalyzedSequence
-```
-
 Only one discussion analysis runs at a time.
 
-Messages arriving during analysis set `analysisPending`.
+Messages arriving while analysis is running set pending work.
 
-When the current analysis completes, newly arrived messages are processed.
+Subsequent analysis processes the newly available message range.
 
 ## Stale results
 
-AI results include the sequence range they analyzed.
+AI results include the sequence range analyzed.
 
 Decision Agent rejects or ignores stale/duplicate results.
 
-## State authority
+## Facilitator state
 
-AI output is also untrusted input.
+M4 persistently applies validated:
 
-AI-generated state must pass the same validation discipline as any other non-authoritative input before it changes SQLite state.
+- assumptions
+- cruxes
+- conflicts
+- action items
+- interventions
 
-The facilitator must never be allowed to bypass Decision Agent domain invariants.
+The Decision Agent remains authoritative over these state changes.
+
+## Position changes
+
+M4 validates position-change observations but does not apply them.
+
+M5 owns position-change behavior and confidence follow-up.
+
+## Intervention repetition
+
+M4 has a basic repetition guard.
+
+It is not sufficient to establish the product requirement of meaningful selectivity.
+
+M5 must implement and test a stronger intervention gate based on whether the underlying issue has materially changed.
 
 ## Acceptance criteria
 
-AI failure does not prevent:
+M4 is complete when:
 
-- posting messages
-- continuing discussion
-- changing positions
-- closing the decision
-
-Malformed AI output cannot corrupt application state.
-
-Facilitator messages do not recursively trigger facilitator analysis.
+- the model passes the required evaluation
+- model output is parsed and validated
+- malformed output cannot corrupt state
+- valid facilitator state is persisted
+- Reveal analysis executes
+- discussion analysis executes
+- facilitator interventions appear in the discussion
+- facilitator messages do not recursively trigger facilitator analysis
+- AI failure does not block participant operations
+- stale AI results cannot overwrite newer state
+- model choice is documented
 
 ---
 
@@ -689,11 +660,11 @@ Facilitator messages do not recursively trigger facilitator analysis.
 
 ## Objective
 
-Complete the participant-facing decision intelligence.
+Complete the facilitator's participant-facing intelligence while preserving neutrality and selectivity.
 
 ## Facilitator state
 
-Implement:
+Use the state established in M4:
 
 - assumptions
 - cruxes
@@ -746,19 +717,45 @@ A conflict may lead to:
 
 The facilitator must not manufacture conflicts.
 
-## Interventions
+## Intervention selectivity
 
-The facilitator:
+The facilitator must:
 
-- observes continuously
-- intervenes selectively
-- remains neutral
-- serves the collective decision
-- does not recommend options
-- does not provide generic reasoning coaching
-- may legitimately remain silent
+- observe continuously
+- intervene selectively
+- remain neutral
+- serve the collective decision
+- avoid generic coaching
+- avoid recommending options
+- legitimately remain silent
 
-The facilitator should not repeat an intervention when the underlying issue has not materially changed.
+A verbatim-repeat check is insufficient.
+
+The intervention gate must consider whether the underlying issue has materially changed since the last intervention.
+
+At minimum, test:
+
+```text
+Message A
+    ↓
+Facilitator identifies issue
+    ↓
+Facilitator intervenes
+
+Message B
+    ↓
+Same issue, no material new information
+    ↓
+Facilitator remains silent
+
+Message C
+    ↓
+Materially changed issue/new evidence
+    ↓
+Facilitator may intervene again
+```
+
+The exact implementation may use structured facilitator state, sequence ranges, issue identifiers, or another mechanism, but it must demonstrate semantic selectivity rather than string deduplication.
 
 ## Position changes
 
@@ -780,7 +777,7 @@ If an explicit position change omits confidence, the facilitator asks for confid
 
 Implement:
 
-```ts
+```text
 getCurrentStateBrief()
 ```
 
@@ -798,6 +795,24 @@ Last visit means the participant's last opening/view, not the last message.
 
 The brief is neutral and must not become an implicit recommendation system.
 
+## Acceptance criteria
+
+M5 is complete when:
+
+- board accurately reflects authoritative state
+- cruxes are visible
+- action items are visible
+- assumptions are appropriately represented
+- explicit position changes work
+- confidence follow-up works
+- inferred position changes do not occur
+- facilitator demonstrates meaningful intervention selectivity
+- repeated unchanged issues do not produce repeated interventions
+- materially changed issues can produce renewed intervention
+- Current State Brief works on first visit
+- Current State Brief summarizes meaningful changes on subsequent visits
+- no facilitator behavior recommends an option
+
 ---
 
 # 12. M6 — Close + Team History
@@ -810,7 +825,7 @@ Complete the decision lifecycle and persist institutional history.
 
 Implement:
 
-```ts
+```text
 closeDecision({
   outcome
 })
@@ -860,15 +875,9 @@ The owner-declared outcome remains authoritative.
 
 ## Team Agent
 
-Implement:
-
-```text
-src/server/agents/team.ts
-```
-
 Store:
 
-```ts
+```text
 ClosedDecisionRecord
 ```
 
@@ -918,7 +927,7 @@ Provide an idempotent seed mechanism that can create the demonstration decision 
 
 The seed mechanism should produce the participant links required for demonstration.
 
-The existing M1/M2 `frameDecision()` capability may be used internally by setup/seed tooling.
+The existing `frameDecision()` capability may be used internally by setup/seed tooling.
 
 It is not a user-facing product API.
 
@@ -927,16 +936,6 @@ It is not a user-facing product API.
 Do not introduce demo-specific runtime logic.
 
 The demonstration is an ordinary persisted decision.
-
-## Idempotency
-
-Repeated:
-
-```bash
-npm run seed
-```
-
-must not create duplicate demo decisions.
 
 ## Acceptance criteria
 
@@ -977,6 +976,7 @@ Cover:
 - persistence
 - realtime projection
 - rejection of invalid client-originated state
+- facilitator state application
 
 ## Workflow tests
 
@@ -990,6 +990,22 @@ Cover:
 - retry
 - stale results
 - coalescing
+
+## Facilitator evaluation
+
+Preserve the model evaluation and methodology from M4.
+
+The evaluation should include:
+
+- assumption recall
+- attribution
+- implicit conflict detection
+- false-positive/invented-conflict rate
+- structured-output validity
+
+Evaluation rubrics should favor semantic correctness over literal keyword matching.
+
+Any rubric changes must be disclosed in the development record.
 
 ## E2E and visual verification
 
@@ -1011,12 +1027,6 @@ Verify:
 - closing memo
 - Team history
 
-## M2/M3 visual gap
-
-M2 and M3 server/runtime and transport behavior are verified.
-
-M8 is responsible for the remaining visual/UI verification that could not be performed through automated browser interaction during those milestones.
-
 ## README
 
 Document:
@@ -1031,14 +1041,17 @@ Document:
 - authentication model
 - bearer credential limitation
 - AI failure model
+- selected model and evaluation
 - seeded scenario
-- model evaluation
 - local development
 - known limitations
 - AI-assisted development process
-- development-only `/d/new` behavior and its non-contractual status
+- development-only `/d/new` behavior
 - Workers/Vitest runtime test setup and dependency requirements
-- realtime state authority and client-state validation
+- realtime state authority
+- client-state validation
+- facilitator validation pipeline
+- intervention selectivity approach
 
 The security limitation must explicitly state:
 
@@ -1112,9 +1125,10 @@ The exact organization may evolve if implementation demonstrates that another st
 - SQLite is authoritative persistence.
 - Agent realtime state remains a small projection.
 - Client-originated realtime state cannot override authoritative state.
-- Workflows perform durable AI processing.
+- Workflow performs durable AI processing.
 - AI never blocks participant operations.
 - AI output is validated.
+- AI-derived state changes pass through Decision Agent validation.
 - Stale AI results cannot overwrite newer state.
 
 ## Deployment
@@ -1192,6 +1206,12 @@ M3 Result / Findings
 Implementation Plan Revision 1.5
     ↓
 M4 Agent Prompt
+    ↓
+M4 Result / Findings
+    ↓
+Implementation Plan Revision 1.6
+    ↓
+M5 Agent Prompt
     ↓
 ...
 ```
