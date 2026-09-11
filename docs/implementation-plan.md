@@ -1,5 +1,5 @@
 # Async Decision Facilitator
-## Repo-Level Implementation Plan — Revision 1.4
+## Repo-Level Implementation Plan — Revision 1.5
 
 ## Revision History
 
@@ -10,6 +10,7 @@
 | **1.2** | Added minimum Workers-runtime integration testing to M2 so transactionality, Durable Object serialization, race determinism, and post-commit Workflow scheduling can be directly proven |
 | **1.3** | Explicitly assigned the minimum submission/owner UI to M2. M2 now delivers the Submit → Reveal experience end-to-end in the browser; M3 owns the discussion UI and realtime discussion experience |
 | **1.4** | Incorporated M2 implementation findings: `/d/new` is development-only and eliminated from production bundles; absence of a `current_positions` row represents no current position; revealed initial submissions are exposed through bootstrap after Reveal; Workers-runtime and transport-level verification are complete; M3 owns realtime and M8 owns visual/E2E verification |
+| **1.5** | Incorporated M3 implementation findings: realtime state remains a non-authoritative projection; client-originated Agent state must be validated and cannot override SQLite; projection updates are followed by authoritative reads; M3 discussion/realtime implementation is complete |
 
 ---
 
@@ -123,7 +124,19 @@ Do not replace runtime verification with mocks or hand-rolled in-memory Durable 
 
 Comprehensive test hardening may remain a later milestone, but required runtime infrastructure must exist when the behavior is first introduced.
 
-## 2.6 Milestones should produce vertical slices
+## 2.6 Realtime state is never authoritative
+
+Agents SDK realtime state is a projection of authoritative SQLite state.
+
+Client-originated state updates are untrusted input.
+
+Any client-originated state change must be validated against authoritative state before acceptance.
+
+Clients must never be able to establish or overwrite authoritative decision state by pushing arbitrary realtime state.
+
+When correctness matters, the application may re-read authoritative state from SQLite after a realtime update rather than attempting to reconstruct correctness from client-visible state.
+
+## 2.7 Milestones should produce vertical slices
 
 When a milestone introduces user-visible behavior, it should include the minimum client UI required to exercise that behavior end-to-end.
 
@@ -131,7 +144,7 @@ Later milestones own their own richer UX.
 
 The goal is not to build the entire UI early; it is to avoid creating server functionality that cannot be exercised through the actual application.
 
-## 2.7 No silent scope expansion
+## 2.8 No silent scope expansion
 
 Do not add:
 
@@ -240,7 +253,7 @@ Known limitations
 
 ---
 
-# 4. Settled Decisions from M1 and M2
+# 4. Settled Decisions from M1–M3
 
 ## 4.1 Decision creation is not currently a public product capability
 
@@ -397,41 +410,33 @@ initialSubmissions = all submitted initial submissions
 
 Initial submissions remain historical context after Reveal.
 
-M2 verified this privacy boundary across two participant sessions.
-
 ---
 
-## 4.7 M2 runtime verification is complete
+## 4.7 Realtime state is a projection
 
-M2 directly exercised the real Workers runtime and Durable Object SQLite storage.
+The Agents SDK realtime state contains a small projection:
 
-Verification included:
-
-- 43 passing tests
-- 24 Node tests
-- 19 Workers-runtime tests
-- typecheck
-- production build
-- credential absence from `dist`
-- runtime Agent/SQLite behavior
-- transactionality
-- race behavior
-- Workflow scheduling boundary
-- post-Reveal failure boundary
-
-The transport-level browser path was also exercised using two live sessions against `npm run dev`, including:
-
-```text
-participant link
-→ 303
-→ HttpOnly session cookie
-→ WebSocket
-→ @callable RPC
+```ts
+interface DecisionRealtimeState {
+  status: DecisionStatus;
+  participantCount: number;
+  submittedCount: number;
+  messageCount: number;
+  messagesVersion: number;
+  positionsVersion: number;
+  boardVersion: number;
+  facilitatorStatus: FacilitatorStatus;
+  lastActivityAt: number | null;
+}
 ```
 
-This verified the server-side/browser transport contract.
+The projection is derived from authoritative SQLite state.
 
-Visual rendering of the React components remains an M8 concern.
+Version/counter fields are not independently authoritative state.
+
+Client-originated state updates must be validated and cannot be allowed to create state that SQLite does not support.
+
+The application may re-read authoritative state after a realtime change. This keeps the live path and refresh path based on the same source of truth.
 
 ---
 
@@ -455,36 +460,11 @@ Visual rendering of the React components remains an M8 concern.
 
 M0 is complete.
 
-It established:
-
-- clean-clone installation
-- type generation
-- typecheck
-- build
-- deployment dry-run
-- one-command deployment
-- deployed Worker
-- Agent bindings
-- Workflow binding
-- credential isolation
-- local development
-
-M0 did not establish runtime execution of Durable Objects, SQLite, Workflows, or Workers AI.
-
 ---
 
 # 7. M1 — Application Spine
 
 M1 is complete.
-
-It established:
-
-- Decision Agent execution
-- SQLite-backed Agent state
-- participant authentication/session model
-- bootstrap RPC
-- React application shell
-- Agent-native application interaction
 
 ---
 
@@ -492,107 +472,25 @@ It established:
 
 M2 is complete.
 
-## Objective
-
-Implement:
-
-```text
-SUBMIT → DISCUSS
-```
-
-including:
+It established:
 
 - initial submissions
 - automatic Reveal
 - owner-forced Reveal
+- transactional lifecycle
 - current-position initialization
-- authorization
-- transactional lifecycle invariants
+- submission privacy
+- post-Reveal submission visibility
 - post-Reveal Workflow scheduling boundary
-- minimum submission/owner browser UI
-
-## Implementation
-
-Implemented:
-
-```ts
-submitInitialPosition()
-declareSubmissionsComplete()
-revealDecision()
-```
-
-Core operations execute transactionally within the Decision Agent.
-
-Automatic Reveal occurs within the final submission transaction.
-
-Owner-forced Reveal uses the same canonical Reveal implementation.
-
-The Reveal Workflow is scheduled only after the successful transaction returns.
-
-Workflow scheduling failure cannot roll back Reveal.
-
-## Client UI
-
-M2 includes:
-
-- submission form
-- owner controls
-- Reveal state
-- current-position display
-
-M2 does not include discussion UI or realtime discussion behavior.
-
-## Runtime verification
-
-M2 directly exercises the Workers runtime.
-
-The runtime test setup uses the Cloudflare Workers Vitest tooling and its required dependency configuration.
-
-M2 directly verifies:
-
-- real Durable Object execution
-- real SQLite persistence
-- serialization
-- transactionality
-- lifecycle races
-- post-commit Workflow scheduling
-
-## Browser/transport verification
-
-M2 verified the browser transport path through two live sessions.
-
-The verification covered:
-
-- persistent participant links
-- session establishment
-- authentication
-- initial submission
-- one-shot immutability
-- validation failures
-- cross-participant privacy
-- owner-forced Reveal
-- automatic Reveal
-- current-position initialization
-- non-submitter behavior
-- late submission rejection
-
-Visual React rendering remains unverified until M8.
-
-## M2 limitations
-
-M2 does not provide:
-
-- realtime updates
-- active facilitator execution
-- actual Workers AI inference
-- discussion UI
-- seeded production demonstration
-
-These are intentionally owned by later milestones.
+- minimum submission/owner UI
+- Workers-runtime test infrastructure
+- runtime transaction/race verification
 
 ---
 
 # 9. M3 — Discussion + Realtime
+
+M3 is complete.
 
 ## Objective
 
@@ -629,65 +527,50 @@ The operation:
 
 AI is not part of the message transaction.
 
-## Client UI
-
-Implement:
-
-```text
-Discussion.tsx
-MessageComposer.tsx
-ConnectionStatus.tsx
-```
-
-The discussion UI must:
-
-- display chronological messages
-- distinguish participant and facilitator messages
-- allow authenticated participants to post
-- reflect connection state
-- update without manual refresh
-
 ## Realtime
 
 Use Agents SDK realtime state synchronization.
 
-Maintain only small projection state:
-
-```ts
-interface DecisionRealtimeState {
-  status: DecisionStatus;
-  participantCount: number;
-  submittedCount: number;
-  messageCount: number;
-  messagesVersion: number;
-  positionsVersion: number;
-  boardVersion: number;
-  facilitatorStatus: FacilitatorStatus;
-  lastActivityAt: number | null;
-}
-```
+Maintain only small projection state.
 
 Historical messages remain in SQLite.
+
+A realtime state update is never treated as authoritative merely because it arrived through the Agent connection.
+
+## Client UI
+
+Implement:
+
+- discussion display
+- message composer
+- connection status
+
+The discussion UI is responsible for rendering current state but does not become a second persistence mechanism.
 
 ## Concurrency
 
 Decision Agent is the serialization boundary.
 
-Test:
+M3 verifies:
 
-- simultaneous messages
-- message vs. close
-- refresh during discussion
-- reconnect
-- multiple concurrent participants
+- multiple participant sessions
+- simultaneous discussion activity
+- discussion vs. Reveal
+- refresh/reconstruction from SQLite
+- realtime delivery without manual refresh
+- client-originated projection tampering is rejected
+
+The message-vs-close race is deferred to M6 because close does not exist yet.
 
 ## Acceptance criteria
 
 Two browser sessions can participate simultaneously.
 
-A committed message becomes visible to other participants without manual refresh.
+A committed message becomes visible to another connected participant without manual refresh.
 
 A refresh reconstructs discussion from authoritative SQLite state.
+
+Client-originated realtime state cannot override authoritative state.
 
 ---
 
@@ -778,6 +661,14 @@ When the current analysis completes, newly arrived messages are processed.
 AI results include the sequence range they analyzed.
 
 Decision Agent rejects or ignores stale/duplicate results.
+
+## State authority
+
+AI output is also untrusted input.
+
+AI-generated state must pass the same validation discipline as any other non-authoritative input before it changes SQLite state.
+
+The facilitator must never be allowed to bypass Decision Agent domain invariants.
 
 ## Acceptance criteria
 
@@ -1085,6 +976,7 @@ Cover:
 - concurrency
 - persistence
 - realtime projection
+- rejection of invalid client-originated state
 
 ## Workflow tests
 
@@ -1119,11 +1011,11 @@ Verify:
 - closing memo
 - Team history
 
-## M2 visual gap
+## M2/M3 visual gap
 
-M2's server/runtime and browser transport behavior are already verified.
+M2 and M3 server/runtime and transport behavior are verified.
 
-M8 is responsible for the remaining visual/UI verification that could not be performed without browser automation.
+M8 is responsible for the remaining visual/UI verification that could not be performed through automated browser interaction during those milestones.
 
 ## README
 
@@ -1146,6 +1038,7 @@ Document:
 - AI-assisted development process
 - development-only `/d/new` behavior and its non-contractual status
 - Workers/Vitest runtime test setup and dependency requirements
+- realtime state authority and client-state validation
 
 The security limitation must explicitly state:
 
@@ -1162,23 +1055,9 @@ The expected end state is approximately:
 ├── src/
 │   ├── client/
 │   │   ├── app/
-│   │   │   ├── App.tsx
-│   │   │   └── routes.tsx
 │   │   ├── components/
-│   │   │   ├── DecisionHeader.tsx
-│   │   │   ├── StateBrief.tsx
-│   │   │   ├── PositionBoard.tsx
-│   │   │   ├── CruxList.tsx
-│   │   │   ├── ActionItemList.tsx
-│   │   │   ├── Discussion.tsx
-│   │   │   ├── MessageComposer.tsx
-│   │   │   ├── SubmissionForm.tsx
-│   │   │   ├── OwnerControls.tsx
-│   │   │   └── ConnectionStatus.tsx
 │   │   ├── hooks/
-│   │   │   └── useDecisionAgent.ts
 │   │   └── main.tsx
-│   │
 │   ├── server/
 │   │   ├── index.ts
 │   │   ├── agents/
@@ -1191,42 +1070,14 @@ The expected end state is approximately:
 │   │   │   ├── decision-schema.ts
 │   │   │   └── team-schema.ts
 │   │   ├── domain/
-│   │   │   ├── decisions.ts
-│   │   │   ├── participants.ts
-│   │   │   ├── submissions.ts
-│   │   │   ├── positions.ts
-│   │   │   ├── messages.ts
-│   │   │   └── board.ts
 │   │   ├── facilitator/
-│   │   │   ├── context.ts
-│   │   │   ├── prompts/
-│   │   │   │   ├── reveal.ts
-│   │   │   │   ├── discussion.ts
-│   │   │   │   ├── brief.ts
-│   │   │   │   └── closing.ts
-│   │   │   ├── schemas.ts
-│   │   │   └── validation.ts
 │   │   └── workflows/
-│   │       └── facilitator.ts
-│   │
 │   └── shared/
-│       ├── types.ts
-│       └── errors.ts
 │
 ├── seed/
-│   └── scenario.ts
 ├── scripts/
-│   ├── setup.ts
-│   └── seed.ts
 ├── evals/
-│   ├── facilitator-transcript.ts
-│   ├── facilitator-eval.ts
-│   └── fixtures/
 ├── test/
-│   ├── unit/
-│   ├── agents/
-│   ├── workflows/
-│   └── e2e/
 ├── wrangler.jsonc
 ├── package.json
 ├── .env.example
@@ -1259,7 +1110,8 @@ The exact organization may evolve if implementation demonstrates that another st
 - Decision Agent is authoritative.
 - Team Agent stores history.
 - SQLite is authoritative persistence.
-- Agent realtime state remains small.
+- Agent realtime state remains a small projection.
+- Client-originated realtime state cannot override authoritative state.
 - Workflows perform durable AI processing.
 - AI never blocks participant operations.
 - AI output is validated.
@@ -1334,6 +1186,12 @@ M2 Result / Findings
 Implementation Plan Revision 1.4
     ↓
 M3 Agent Prompt
+    ↓
+M3 Result / Findings
+    ↓
+Implementation Plan Revision 1.5
+    ↓
+M4 Agent Prompt
     ↓
 ...
 ```
