@@ -163,10 +163,20 @@ export function parseAnalysis(output: unknown, context: FacilitatorContext): Fac
         explicit: boolean(item.explicit, `${at}.explicit`)
       };
     })
-    .filter(
-      (c): c is FacilitatorAnalysisResult["positionChanges"][number] =>
-        c.explicit && c.participantId !== undefined && c.optionId !== undefined
-    );
+    .filter((c): c is FacilitatorAnalysisResult["positionChanges"][number] => {
+      const kept = c.explicit && c.participantId !== undefined && c.optionId !== undefined;
+      // A dropped change is a position that did not move, which is a silence
+      // nobody can otherwise account for — least of all the participant who
+      // said they were changing it.
+      if (!kept) {
+        console.log(
+          `dropped a position change: ${
+            !c.explicit ? "not explicit" : c.participantId === undefined ? "unknown participant" : "unknown option"
+          }`
+        );
+      }
+      return kept;
+    });
 
   return {
     analyzedThroughSeq,

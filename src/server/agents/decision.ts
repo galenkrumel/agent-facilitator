@@ -808,11 +808,11 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
    * is the difference between this and refusing to repeat a string.
    *
    * Its known ceiling: the digest covers the whole facilitator model rather
-   * than the part belonging to one issue, so an unrelated development
-   * elsewhere in the decision can re-open an issue that has not itself moved.
-   * Linking each issue to the state it rests on would need the model to
-   * maintain that link across analyses, which is a good deal more to trust it
-   * with than an issue key.
+   * than the part belonging to one issue, so an unrelated *material*
+   * development elsewhere in the decision can re-open an issue that has not
+   * itself moved. Linking each issue to the state it rests on would need the
+   * model to maintain that link across analyses, which is a good deal more to
+   * trust it with than an issue key.
    *
    * Posting is deliberately not `postMessageFor`: that schedules analysis, and
    * an intervention that triggered the analysis that produced the next
@@ -824,7 +824,12 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       SELECT state_digest FROM facilitator_interventions
       WHERE issue_key = ${intervention.issueKey} ORDER BY created_at DESC LIMIT 1
     `;
-    if (prior && prior.state_digest === digest) return;
+    if (prior && prior.state_digest === digest) {
+      // Worth a line: silence and suppression look identical from outside, and
+      // "why did the facilitator say nothing" is otherwise unanswerable.
+      console.log(`held back an intervention on ${intervention.issueKey}: nothing has changed`);
+      return;
+    }
 
     // A backstop for the same issue arriving under a new key: the model has
     // re-worded the identifier, but not the message.
@@ -849,15 +854,27 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
    *
    * Deliberately not a timestamp or a row count: both move whenever an
    * analysis runs, and this has to stay still while the facilitator's
-   * understanding does. Statuses and text, because a re-worded assumption is a
-   * changed one — the facilitator is reading the discussion differently — but
-   * a re-worded *intervention* about an unchanged reading is not.
+   * understanding does.
+   *
+   * *Open* assumptions are deliberately excluded, and that exclusion is the
+   * whole difference between a gate that closes and one that does not. The
+   * facilitator adds open assumptions constantly — every message anyone posts
+   * gives it another one — so a digest that counted them moved on every
+   * analysis, and an issue raised once could be raised again one message
+   * later. It was: end-to-end, the facilitator asked about the same
+   * unquantified cost twice in three messages, under the same issue key.
+   *
+   * What is left is what a participant would call a development: the board,
+   * where anybody's position stands, and the assumptions whose standing has
+   * changed — an assumption that has been challenged, refuted or agreed is a
+   * thing that happened, where one merely noticed is not.
    */
   private materialDigest(): string {
     const [digest] = this.sql<{ value: string }>`
       SELECT
         COALESCE((SELECT group_concat(s, '|') FROM
-          (SELECT statement || '~' || status AS s FROM facilitator_assumptions ORDER BY statement)), '') || '#' ||
+          (SELECT statement || '~' || status AS s FROM facilitator_assumptions
+           WHERE status <> 'OPEN' ORDER BY statement)), '') || '#' ||
         COALESCE((SELECT group_concat(s, '|') FROM
           (SELECT question || '~' || status AS s FROM facilitator_cruxes ORDER BY question)), '') || '#' ||
         COALESCE((SELECT group_concat(s, '|') FROM

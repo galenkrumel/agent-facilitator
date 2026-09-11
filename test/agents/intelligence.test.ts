@@ -206,6 +206,41 @@ describe("intervention selectivity", () => {
     expect(await facilitatorMessages(agent)).toHaveLength(2);
   });
 
+  it("is not re-opened by the facilitator merely noticing more", async () => {
+    // The failure this pins was found end-to-end, not here: every message
+    // gives the facilitator another open assumption, so a gate that counted
+    // those re-opened every issue one message after it was raised — and the
+    // facilitator asked about the same unquantified cost twice in three
+    // messages, under the same issue key. Noticing is not a development.
+    const { agent, id } = await discussing();
+    await agent.postMessageFor(id.Ada!, "One.");
+    await agent.applyAnalysis(reading(1, "OPEN", { issueKey: ISSUE, message: "Are you assuming X?" }));
+
+    await agent.postMessageFor(id.Grace!, "Still the same disagreement, honestly.");
+    await agent.applyAnalysis({
+      ...reading(3, "OPEN", { issueKey: ISSUE, message: "Could you put a number on X?" }),
+      assumptions: [
+        {
+          participantId: null,
+          statement: "The crash reports are not release-blocking",
+          source: "INFERRED",
+          status: "OPEN",
+          firstSeenSeq: 1
+        },
+        // New, and real — but nothing has happened to the issue.
+        {
+          participantId: id.Grace!,
+          statement: "A week of triage is affordable",
+          source: "INFERRED",
+          status: "OPEN",
+          firstSeenSeq: 3
+        }
+      ]
+    });
+
+    expect(await facilitatorMessages(agent)).toHaveLength(1);
+  });
+
   it("is not fooled by the same issue arriving under a new key", async () => {
     const { agent, id } = await discussing();
     await agent.postMessageFor(id.Ada!, "One.");

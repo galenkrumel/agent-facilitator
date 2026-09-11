@@ -266,11 +266,24 @@ practice, and is precisely what the digest catches and a string comparison does
 not. A verbatim check remains as a backstop for the same issue arriving under a
 freshly invented key.
 
+**Open assumptions are deliberately excluded from the digest**, and that
+exclusion is the difference between a gate that closes and one that does not.
+The facilitator adds open assumptions constantly — every message gives it
+another — so a digest that counted them moved on every analysis, and an issue
+raised once could be raised again one message later. It did: end-to-end, the
+facilitator asked about the same unquantified cost twice in three messages,
+under the same issue key, with the digest growing from 1578 to 1634 characters
+between them. What the digest tracks now is what a participant would call a
+development — the board, where anybody's position stands, and the assumptions
+whose standing has changed. An assumption challenged, refuted or agreed is a
+thing that happened; one merely noticed is not.
+
 Its known ceiling: the digest covers the whole facilitator model rather than
-the part belonging to one issue, so an unrelated development elsewhere can
-re-open an issue that has not itself moved. Linking each issue to the state it
-rests on would mean trusting the model to maintain that link across analyses,
-which is a great deal more than trusting it with an identifier.
+the part belonging to one issue, so an unrelated *material* development
+elsewhere can re-open an issue that has not itself moved. Linking each issue to
+the state it rests on would mean trusting the model to maintain that link
+across analyses, which is a great deal more than trusting it with an
+identifier.
 
 ## The Current State Brief
 
@@ -343,6 +356,38 @@ transcript changes position — Priya says in so many words that she has not —
 every change reported against it is one the model inferred, and an inferred
 change is the one kind of model error that would rewrite a participant's stated
 position for them.
+
+## End-to-end verification
+
+The runtime tests prove the Agent's rules against analyses handed in by hand.
+`scripts/verify.ts` proves the same rules with a real model attached, by being
+a second participant:
+
+```bash
+npm run dev                                     # in another terminal
+node scripts/verify.ts frame "…" "Ada,Grace" "Option A,Option B"
+node scripts/verify.ts submit <link> opt-2 3 "…"
+node scripts/verify.ts say    <link> "…"        # posts, waits for the facilitator
+node scripts/verify.ts state  <link>
+node scripts/verify.ts watch  <link> 90         # every push, unprompted
+```
+
+It speaks the Agents SDK's RPC frames over its own WebSocket with its own
+cookie jar, which is what makes it a genuinely separate participant: the
+session cookie is named per decision, so two people in one decision cannot
+share a browser profile. Open the other participant's link in a browser and
+the pair covers the whole loop — reveal, analysis, board, a realtime update
+arriving somewhere it was not caused, a position change, the confidence
+follow-up, selectivity, refresh, and the returning brief.
+
+It needs `npm run dev`, because `/d/new` exists only in development; a deployed
+instance has no way to create a decision until M7 seeds one.
+
+Two defects were found this way and neither was visible to the tests: the
+intervention gate did not close in a live discussion (above), and a position
+change stated in a participant's own words rather than in the option's exact
+label was not reported at all, so a stated position was silently lost. Both are
+fixed, and both now have a test.
 
 ## Prerequisites
 

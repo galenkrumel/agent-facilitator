@@ -232,7 +232,13 @@ Reasoning that shifts, a concession, an acknowledgement that someone has a
 point, or an argument that now looks weaker is NOT a position change. If you
 find yourself deducing a change, it is not one: leave it out.
 
-- option: the label they now hold, or null if only their confidence changed.
+- option: the label they now hold, copied exactly as it appears under OPTIONS.
+  People say it in their own words — "I'm with Grace on this one", "fine, we
+  stay" — so use the option they plainly meant, and leave the change out
+  entirely if you cannot tell which one that is. A change reported against a
+  label that is not on the list is discarded, and their stated position is
+  then simply lost.
+- option: null if only their confidence changed.
 - confidence: the number they gave, or null if they did not give one. Do not
   guess it — a change with no confidence is followed up automatically.
 
