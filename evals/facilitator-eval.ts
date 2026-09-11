@@ -41,7 +41,14 @@ const CRITERIA = {
   /** Runs that must surface at least one of the two implicit conflicts. */
   implicitConflictRuns: 0.5,
   /** Reported conflicts per run that match nothing in the transcript. */
-  maxUnrecognisedConflicts: 1
+  maxUnrecognisedConflicts: 1,
+  /**
+   * Position changes per run. Nobody in the transcript changes position —
+   * Priya says in so many words that she has not — so every change reported
+   * here is one the model inferred, and an inferred change that reached the
+   * Decision Agent would rewrite somebody's stated position for them.
+   */
+  maxPositionChanges: 0
 };
 
 type RunResult = {
@@ -51,6 +58,8 @@ type RunResult = {
   attributed: boolean[];
   implicit: boolean[];
   unrecognised: string[];
+  /** What survived the parser: explicit, attributable, on a real option. */
+  positionChanges: number;
   intervention: string | null;
   ms: number;
 };
@@ -113,6 +122,7 @@ async function run(
     attributed: KNOWN_ASSUMPTIONS.map(() => false),
     implicit: [false, false],
     unrecognised: [],
+    positionChanges: 0,
     intervention: null,
     ms: 0
   };
@@ -121,7 +131,8 @@ async function run(
     const raw = await infer(accountId, token, model, prompt);
     const analysis = parseAnalysis(raw, TRANSCRIPT);
     result.analysis = analysis;
-    result.intervention = analysis.intervention;
+    result.positionChanges = analysis.positionChanges.length;
+    result.intervention = analysis.intervention?.message ?? null;
     score(analysis, result);
   } catch (e) {
     result.error = e instanceof Error ? e.message : String(e);
@@ -220,7 +231,8 @@ function measure(results: RunResult[]) {
       ok.filter((r) => count(r.found) > 0).map((r) => count(r.attributed) / count(r.found))
     ),
     implicitConflictRuns: ok.length ? ok.filter((r) => r.implicit.some(Boolean)).length / ok.length : 0,
-    unrecognised: mean(ok.map((r) => r.unrecognised.length))
+    unrecognised: mean(ok.map((r) => r.unrecognised.length)),
+    positionChanges: mean(ok.map((r) => r.positionChanges))
   };
 }
 
@@ -231,7 +243,8 @@ function verdict(results: RunResult[]): boolean {
     m.assumptionRecall >= CRITERIA.assumptionRecall &&
     m.attributionAccuracy >= CRITERIA.attributionAccuracy &&
     m.implicitConflictRuns >= CRITERIA.implicitConflictRuns &&
-    m.unrecognised <= CRITERIA.maxUnrecognisedConflicts
+    m.unrecognised <= CRITERIA.maxUnrecognisedConflicts &&
+    m.positionChanges <= CRITERIA.maxPositionChanges
   );
 }
 
@@ -276,6 +289,7 @@ function report(results: RunResult[], model: string, show: boolean) {
   line(m.attributionAccuracy >= CRITERIA.attributionAccuracy, "attribution accuracy ≥ 90%", pct(m.attributionAccuracy));
   line(m.implicitConflictRuns >= CRITERIA.implicitConflictRuns, "≥1 implicit conflict, ≥half the runs", pct(m.implicitConflictRuns));
   line(m.unrecognised <= CRITERIA.maxUnrecognisedConflicts, "unrecognised conflicts ≤ 1 per run", m.unrecognised.toFixed(1));
+  line(m.positionChanges <= CRITERIA.maxPositionChanges, "no inferred position changes", m.positionChanges.toFixed(1));
 
   for (const r of results) if (r.error) console.log(`\n  failure: ${r.error}`);
   if (show && results[0]?.analysis) {

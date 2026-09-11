@@ -1,5 +1,7 @@
 import { useDecisionAgent, type DecisionConnection } from "../hooks/useDecisionAgent.ts";
+import { Board } from "../components/Board.tsx";
 import { ConnectionStatus } from "../components/ConnectionStatus.tsx";
+import { CurrentStateBrief } from "../components/CurrentStateBrief.tsx";
 import { Discussion } from "../components/Discussion.tsx";
 import { OwnerControls } from "../components/OwnerControls.tsx";
 import { SubmissionForm } from "../components/SubmissionForm.tsx";
@@ -77,6 +79,8 @@ function Decision({
         )}
       </header>
 
+      {connection.brief && <CurrentStateBrief brief={connection.brief} />}
+
       {!revealed && (
         <Section title="Options">
           <ul className="space-y-1">
@@ -111,9 +115,14 @@ function Decision({
         </ul>
       </Section>
 
-      <Section title={revealed ? "Positions" : "Your position"}>
+      <Section title={revealed ? "Board" : "Your position"}>
         {revealed ? (
-          <Positions bootstrap={bootstrap} />
+          <Board
+            board={bootstrap.board}
+            options={decision.options}
+            submissions={bootstrap.submissions}
+            viewerId={viewer.participantId}
+          />
         ) : permissions.canSubmit ? (
           <SubmissionForm
             options={decision.options}
@@ -166,45 +175,6 @@ function Decision({
         </Section>
       )}
     </Shell>
-  );
-}
-
-/**
- * Post-Reveal positions. Every participant is listed, including those who never
- * submitted: they take part in the discussion without an initial position, and
- * showing them as absent is more honest than leaving them out.
- */
-function Positions({ bootstrap }: { bootstrap: DecisionBootstrap }) {
-  const submissions = new Map(bootstrap.submissions.map((s) => [s.participantId, s]));
-  const positions = new Map(bootstrap.positions.map((p) => [p.participantId, p]));
-
-  return (
-    <ul className="space-y-4">
-      {bootstrap.participants.map((participant) => {
-        const position = positions.get(participant.id);
-        const submission = submissions.get(participant.id);
-        return (
-          <li key={participant.id}>
-            <p className="text-neutral-900">
-              <span className="font-medium">{participant.displayName}</span>
-              {participant.id === bootstrap.viewer.participantId && " (you)"}
-              {" — "}
-              {position?.optionId ? (
-                <>
-                  {labelOf(bootstrap, position.optionId)}
-                  {position.confidence !== null && (
-                    <span className="text-neutral-500"> · confidence {position.confidence}/5</span>
-                  )}
-                </>
-              ) : (
-                <span className="text-neutral-500">no position submitted</span>
-              )}
-            </p>
-            <Reasons submission={submission} />
-          </li>
-        );
-      })}
-    </ul>
   );
 }
 

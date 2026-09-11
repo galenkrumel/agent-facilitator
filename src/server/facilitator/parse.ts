@@ -20,9 +20,11 @@ import { MAX_MESSAGE_LENGTH, validateMessageBody } from "../domain/messages.ts";
 import type {
   AssumptionSource,
   AssumptionStatus,
+  Confidence,
   Conflict,
   FacilitatorAnalysisResult,
-  FacilitatorContext
+  FacilitatorContext,
+  Intervention
 } from "../../shared/types.ts";
 
 /**
@@ -31,7 +33,16 @@ import type {
  * listing every sentence in the transcript as an assumption gets truncated
  * rather than filling the board.
  */
-export const LIMITS = { assumptions: 20, cruxes: 10, conflicts: 10, actionItems: 10 } as const;
+export const LIMITS = {
+  assumptions: 20,
+  cruxes: 10,
+  conflicts: 10,
+  actionItems: 10,
+  positionChanges: 10
+} as const;
+
+/** An issue key is an identifier, not a sentence. */
+const MAX_ISSUE_KEY_LENGTH = 80;
 
 const SOURCES: AssumptionSource[] = ["EXPLICIT", "INFERRED"];
 const ASSUMPTION_STATUSES: AssumptionStatus[] = ["OPEN", "CONFIRMED", "CHALLENGED", "REFUTED"];
@@ -132,16 +143,38 @@ export function parseAnalysis(output: unknown, context: FacilitatorContext): Fac
       };
     });
 
+  // A participant's current position is their own to state, so an observation
+  // that is not explicit is dropped here rather than being carried into the
+  // Agent and ignored there — the one rule that protects it is easier to trust
+  // when nothing downstream ever sees an inferred change at all.
+  const option = optionResolver(context);
+  const positionChanges = array(value.positionChanges, "positionChanges")
+    .slice(0, LIMITS.positionChanges)
+    .map((item, i) => {
+      const at = `positionChanges[${i}]`;
+      const named = optionalString(item.participant, `${at}.participant`);
+      const label = optionalString(item.option, `${at}.option`);
+      return {
+        participantId: named === null ? undefined : resolve(named),
+        // Null is "unchanged"; a label nobody offered is not a position anyone
+        // can hold, and the change is dropped rather than half-applied.
+        optionId: label === null ? null : option(label),
+        confidence: confidence(item.confidence, `${at}.confidence`),
+        explicit: boolean(item.explicit, `${at}.explicit`)
+      };
+    })
+    .filter(
+      (c): c is FacilitatorAnalysisResult["positionChanges"][number] =>
+        c.explicit && c.participantId !== undefined && c.optionId !== undefined
+    );
+
   return {
     analyzedThroughSeq,
     assumptions,
     cruxes,
     conflicts,
     actionItems,
-    // M5 owns position changes: only an explicit one may move a current
-    // position, and an explicit change without a confidence has to be followed
-    // up. Until that exists the facilitator does not report them.
-    positionChanges: [],
+    positionChanges,
     intervention: intervention(value.intervention)
   };
 }
@@ -172,17 +205,38 @@ function participantResolver(context: FacilitatorContext): (name: string) => str
   return (name) => byName.get(name.trim().toLowerCase());
 }
 
-/** `null` for silence; otherwise a message that would be valid from anyone. */
-function intervention(value: unknown): string | null {
+/**
+ * Maps an option label to its id, or `undefined` when the decision has no such
+ * option. Matched the way participant names are, and for the same reason: the
+ * model reads labels out of the prompt, and ids never reach it.
+ */
+function optionResolver(context: FacilitatorContext): (label: string) => string | undefined {
+  const byLabel = new Map(
+    context.decision.options.map((o) => [o.label.trim().toLowerCase(), o.id])
+  );
+  return (label) => byLabel.get(label.trim().toLowerCase());
+}
+
+/** `null` for silence; otherwise an issue key and a message anyone could post. */
+function intervention(value: unknown): Intervention | null {
   if (value === null || value === undefined) return null;
-  if (typeof value !== "string") throw new Error("intervention must be a string or null");
-  if (!value.trim()) return null;
-  if (value.trim().length > MAX_MESSAGE_LENGTH) {
-    throw new Error(`intervention exceeds ${MAX_MESSAGE_LENGTH} characters`);
+  if (!isRecord(value)) throw new Error("intervention must be an object or null");
+  if (typeof value.message !== "string" || !value.message.trim()) return null;
+  if (value.message.trim().length > MAX_MESSAGE_LENGTH) {
+    throw new Error(`intervention.message exceeds ${MAX_MESSAGE_LENGTH} characters`);
   }
-  // The facilitator's message is held to the same rule as a participant's —
-  // it is posted into the same thread by the same insert.
-  return validateMessageBody(value);
+
+  const key = statement(value.issue, "intervention.issue").toLowerCase();
+  if (key.length > MAX_ISSUE_KEY_LENGTH) throw new Error("intervention.issue is too long");
+
+  return {
+    // Normalised, because the key is compared: the same issue written
+    // "Contract Extension" and "contract extension" is one issue.
+    issueKey: key.replace(/\s+/g, "-"),
+    // The facilitator's message is held to the same rule as a participant's —
+    // it is posted into the same thread by the same insert.
+    message: validateMessageBody(value.message)
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +271,20 @@ function optionalString(value: unknown, at: string): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== "string") throw new Error(`${at} must be a string or null`);
   return value.trim() || null;
+}
+
+function boolean(value: unknown, at: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`${at} must be a boolean`);
+  return value;
+}
+
+/** A confidence the participant actually gave, or null for "they did not". */
+function confidence(value: unknown, at: string): Confidence | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 5) {
+    throw new Error(`${at} must be an integer 1–5 or null`);
+  }
+  return value as Confidence;
 }
 
 function oneOf<T extends string>(value: unknown, allowed: T[], at: string): T {

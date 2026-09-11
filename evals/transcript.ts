@@ -145,6 +145,9 @@ export const TRANSCRIPT: FacilitatorContext = {
   cruxes: [],
   conflicts: [],
   actionItems: [],
+  // The facilitator has said nothing yet, so every run is scored on a first
+  // reading of the discussion rather than on how it reacts to itself.
+  interventions: [],
   meta: { analysisRunning: true, analysisPending: false, lastAnalyzedSeq: 0, lastError: null }
 };
 

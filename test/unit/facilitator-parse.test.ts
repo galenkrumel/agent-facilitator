@@ -22,8 +22,27 @@ function output(overrides: Record<string, unknown> = {}) {
     cruxes: [{ question: "Can the contract be extended?", status: "OPEN" }],
     conflicts: [{ description: "Priya and Marcus disagree", participants: ["Priya", "Marcus"], status: "OPEN" }],
     actionItems: [{ description: "Ask Arcus about the renewal", owner: "Marcus" }],
-    intervention: "Are you assuming the contract cannot be extended, Marcus?",
+    positionChanges: [],
+    intervention: {
+      issue: "contract-extension",
+      message: "Are you assuming the contract cannot be extended, Marcus?"
+    },
     ...overrides
+  };
+}
+
+/** One well-formed observed change, overridable field by field. */
+function change(overrides: Record<string, unknown> = {}) {
+  return {
+    positionChanges: [
+      {
+        participant: "Priya",
+        option: "Move to Northwind before Q3",
+        confidence: 4,
+        explicit: true,
+        ...overrides
+      }
+    ]
   };
 }
 
@@ -33,7 +52,7 @@ describe("parsing the model's response", () => {
   it("accepts an object, which is what structured-output mode returns", () => {
     const result = parse(output());
     expect(result.assumptions[0]!.statement).toBe("The migration is six weeks");
-    expect(result.intervention).toMatch(/Are you assuming/);
+    expect(result.intervention?.message).toMatch(/Are you assuming/);
   });
 
   it("accepts the same thing as text", () => {
@@ -149,18 +168,78 @@ describe("semantic validation", () => {
 describe("the intervention", () => {
   it("is null when the facilitator has nothing to say", () => {
     expect(parse(output({ intervention: null })).intervention).toBeNull();
-    expect(parse(output({ intervention: "   " })).intervention).toBeNull();
+    expect(parse(output({ intervention: { issue: "x", message: "   " } })).intervention).toBeNull();
   });
 
   it("is held to the same rules as a participant's message", () => {
-    expect(parse(output({ intervention: "  Trimmed.  " })).intervention).toBe("Trimmed.");
-    expect(() => parse(output({ intervention: "x".repeat(5000) }))).toThrow(/exceeds/);
-    expect(() => parse(output({ intervention: 12 }))).toThrow(/string or null/);
+    expect(parse(output({ intervention: { issue: "x", message: "  Trimmed.  " } }))).toMatchObject({
+      intervention: { message: "Trimmed." }
+    });
+    expect(() => parse(output({ intervention: { issue: "x", message: "y".repeat(5000) } }))).toThrow(
+      /exceeds/
+    );
+    expect(() => parse(output({ intervention: "a bare string" }))).toThrow(/object or null/);
   });
 
-  it("never reports a position change — M5 owns applying those", () => {
-    expect(parse(output({ positionChanges: [{ participant: "Priya", option: "opt-1" }] })).positionChanges).toEqual(
-      []
+  it("carries an issue key, normalised so the same issue compares equal", () => {
+    expect(
+      parse(output({ intervention: { issue: " Contract Extension ", message: "Ask them." } }))
+        .intervention?.issueKey
+    ).toBe("contract-extension");
+    expect(() => parse(output({ intervention: { issue: "", message: "Ask them." } }))).toThrow(
+      /non-empty/
+    );
+    expect(() =>
+      parse(output({ intervention: { issue: "x".repeat(200), message: "Ask them." } }))
+    ).toThrow(/too long/);
+  });
+});
+
+describe("observed position changes", () => {
+  it("resolves the participant and the option label they named", () => {
+    expect(parse(output(change())).positionChanges).toEqual([
+      { participantId: PRIYA, optionId: "opt-1", confidence: 4, explicit: true }
+    ]);
+  });
+
+  it("drops anything the facilitator only inferred", () => {
+    // The one rule protecting a participant's stated position: reasoning that
+    // shifts is not a change, and nothing downstream ever sees one.
+    expect(parse(output(change({ explicit: false }))).positionChanges).toEqual([]);
+    expect(() => parse(output(change({ explicit: "yes" })))).toThrow(/must be a boolean/);
+  });
+
+  it("keeps a confidence-only change, where no option is named", () => {
+    expect(parse(output(change({ option: null }))).positionChanges).toEqual([
+      { participantId: PRIYA, optionId: null, confidence: 4, explicit: true }
+    ]);
+  });
+
+  it("keeps an option change with no confidence — the Agent asks for it", () => {
+    expect(parse(output(change({ confidence: null }))).positionChanges).toEqual([
+      { participantId: PRIYA, optionId: "opt-1", confidence: null, explicit: true }
+    ]);
+  });
+
+  it("drops a change naming an option or a person the decision does not have", () => {
+    expect(parse(output(change({ option: "Switch to Stripe" }))).positionChanges).toEqual([]);
+    expect(parse(output(change({ participant: "Napoleon" }))).positionChanges).toEqual([]);
+  });
+
+  it("refuses a confidence outside 1–5", () => {
+    expect(() => parse(output(change({ confidence: 9 })))).toThrow(/integer 1–5/);
+    expect(() => parse(output(change({ confidence: 2.5 })))).toThrow(/integer 1–5/);
+  });
+
+  it("caps how many changes one response can apply", () => {
+    const many = Array.from({ length: LIMITS.positionChanges + 5 }, () => ({
+      participant: "Priya",
+      option: "Stay with Arcus for another year",
+      confidence: 3,
+      explicit: true
+    }));
+    expect(parse(output({ positionChanges: many })).positionChanges).toHaveLength(
+      LIMITS.positionChanges
     );
   });
 });

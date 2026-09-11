@@ -102,6 +102,18 @@ CREATE TABLE IF NOT EXISTS facilitator_action_items (
   created_at INTEGER NOT NULL
 );
 
+-- Every intervention the facilitator has made, with the issue it was about and
+-- a digest of what the decision materially looked like at the time. That pair
+-- is the intervention gate: the same issue is not raised twice while nothing
+-- underneath it has moved. The message itself lives in the messages table.
+CREATE TABLE IF NOT EXISTS facilitator_interventions (
+  id TEXT PRIMARY KEY,
+  issue_key TEXT NOT NULL,
+  message_seq INTEGER NOT NULL REFERENCES messages(seq),
+  state_digest TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 -- Single row: AI scheduling/coalescing bookkeeping. Only one analysis runs at
 -- a time; messages arriving during one set analysis_pending, and the run that
 -- finishes schedules the follow-up.

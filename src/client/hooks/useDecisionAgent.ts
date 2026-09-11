@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useAgent } from "agents/react";
 import type { DecisionAgent } from "../../server/agents/decision.ts";
 import type { InitialSubmissionInput } from "../../server/domain/submissions.ts";
-import type { DecisionBootstrap, DecisionRealtimeState } from "../../shared/types.ts";
+import type { DecisionBootstrap, DecisionRealtimeState, StateBrief } from "../../shared/types.ts";
 
 /** The session cookie was missing or expired — the participant link is stale. */
 const UNAUTHENTICATED = 4401;
@@ -12,6 +12,8 @@ export type ConnectionStatus = "CONNECTING" | "ONLINE" | "OFFLINE";
 
 export type DecisionConnection = {
   bootstrap: DecisionBootstrap | null;
+  /** Read once, on opening: reading it is what records the visit. */
+  brief: StateBrief | null;
   status: ConnectionStatus;
   /** Set when the decision cannot be shown at all. */
   error: string | null;
@@ -38,6 +40,7 @@ export type DecisionConnection = {
  */
 export function useDecisionAgent(decisionId: string): DecisionConnection {
   const [bootstrap, setBootstrap] = useState<DecisionBootstrap | null>(null);
+  const [brief, setBrief] = useState<StateBrief | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("CONNECTING");
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -73,6 +76,18 @@ export function useDecisionAgent(decisionId: string): DecisionConnection {
       );
   }, [agent, version]);
 
+  // Deliberately not keyed on `version`: the brief is the state of the
+  // decision at the moment this participant opened it, and fetching it is what
+  // moves their "last visit" boundary. One read per opening.
+  useEffect(() => {
+    agent.stub
+      .getCurrentStateBrief()
+      .then(setBrief)
+      // A brief that cannot be read is not worth an error page — the decision
+      // itself is right below it, and is the thing the participant came for.
+      .catch((e: unknown) => console.error("could not read the current state brief", e));
+  }, [agent]);
+
   /**
    * Runs one Agent mutation. A rejection is the Agent refusing the action —
    * already submitted, already revealed, not the owner — and is shown in place
@@ -94,6 +109,7 @@ export function useDecisionAgent(decisionId: string): DecisionConnection {
 
   return {
     bootstrap,
+    brief,
     status,
     error,
     actionError,

@@ -2,12 +2,14 @@ import { Agent, callable, getCurrentAgent, type Connection, type ConnectionConte
 import { DECISION_SCHEMA } from "../db/decision-schema.ts";
 import { hashCredential, newCredential } from "../auth/credentials.ts";
 import { newSessionId, readSessionId, SESSION_TTL_MS } from "../auth/sessions.ts";
+import { composeBrief } from "../domain/brief.ts";
 import { permissionsFor } from "../domain/decisions.ts";
 import { validateMessageBody } from "../domain/messages.ts";
 import { validateSubmission, type InitialSubmissionInput } from "../domain/submissions.ts";
 import type { FacilitatorWorkflowParams } from "../workflows/facilitator.ts";
 import type {
   ActionItem,
+  BoardView,
   Confidence,
   Conflict,
   Crux,
@@ -19,10 +21,15 @@ import type {
   FacilitatorAnalysisResult,
   FacilitatorAssumption,
   FacilitatorContext,
+  FacilitatorIntervention,
   FacilitatorStatus,
   InitialSubmission,
+  Intervention,
   Message,
-  Participant
+  ObservedPositionChange,
+  Participant,
+  PendingParticipantRequest,
+  StateBrief
 } from "../../shared/types.ts";
 
 /** What the owner supplies when framing a decision. */
@@ -524,25 +531,7 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       submissions: decision.status === "SUBMIT" ? [] : submissions,
       positions: this.positions(),
       messages: this.messages(),
-      assumptions: this.sql<{
-        id: string;
-        participant_id: string | null;
-        statement: string;
-        source: string;
-        status: string;
-        first_seen_seq: number;
-        updated_at: number;
-      }>`SELECT * FROM facilitator_assumptions ORDER BY first_seen_seq, statement`.map(
-        (r): FacilitatorAssumption => ({
-          id: r.id,
-          participantId: r.participant_id,
-          statement: r.statement,
-          source: r.source as FacilitatorAssumption["source"],
-          status: r.status as FacilitatorAssumption["status"],
-          firstSeenSeq: r.first_seen_seq,
-          updatedAt: r.updated_at
-        })
-      ),
+      assumptions: this.assumptions(),
       cruxes: this.cruxes(),
       conflicts: this.sql<{
         id: string;
@@ -560,6 +549,7 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
         })
       ),
       actionItems: this.actionItems(),
+      interventions: this.interventions(),
       meta: {
         analysisRunning: Boolean(meta?.analysis_running),
         analysisPending: meta?.analysis_pending === 1,
@@ -658,8 +648,8 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
     const key = (text: string) => text.trim().toLowerCase();
 
     const priorAssumptions = new Map(
-      this.sql<{ id: string; statement: string; first_seen_seq: number }>`
-        SELECT id, statement, first_seen_seq FROM facilitator_assumptions
+      this.sql<{ id: string; statement: string; status: string; first_seen_seq: number; updated_at: number }>`
+        SELECT id, statement, status, first_seen_seq, updated_at FROM facilitator_assumptions
       `.map((r) => [key(r.statement), r])
     );
     this.sql`DELETE FROM facilitator_assumptions`;
@@ -669,13 +659,14 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
         INSERT INTO facilitator_assumptions
           (id, participant_id, statement, source, status, first_seen_seq, updated_at)
         VALUES (${prior?.id ?? crypto.randomUUID()}, ${participant(a.participantId)}, ${a.statement},
-                ${a.source}, ${a.status}, ${prior?.first_seen_seq ?? a.firstSeenSeq}, ${now})
+                ${a.source}, ${a.status}, ${prior?.first_seen_seq ?? a.firstSeenSeq},
+                ${unchanged(prior, prior?.status === a.status, now)})
       `;
     }
 
     const priorCruxes = new Map(
-      this.sql<{ id: string; question: string; created_at: number }>`
-        SELECT id, question, created_at FROM facilitator_cruxes
+      this.sql<{ id: string; question: string; status: string; created_at: number; updated_at: number }>`
+        SELECT id, question, status, created_at, updated_at FROM facilitator_cruxes
       `.map((r) => [key(r.question), r])
     );
     this.sql`DELETE FROM facilitator_cruxes`;
@@ -684,7 +675,7 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       this.sql`
         INSERT INTO facilitator_cruxes (id, question, status, created_at, updated_at)
         VALUES (${prior?.id ?? crypto.randomUUID()}, ${c.question}, ${c.status},
-                ${prior?.created_at ?? now}, ${now})
+                ${prior?.created_at ?? now}, ${unchanged(prior, prior?.status === c.status, now)})
       `;
     }
 
@@ -719,33 +710,164 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       `;
     }
 
-    // M5 applies `positionChanges`: only an explicit change may move a current
-    // position, and one that omits confidence has to be followed up. Until
-    // then the facilitator does not report them, and could not apply one here
-    // if it did — a current position is a participant's own to state.
-
+    for (const change of result.positionChanges) this.applyPositionChange(change, now);
     if (result.intervention) this.postIntervention(result.intervention, now);
   }
 
   /**
-   * Posts the facilitator's message into the same thread, with no author.
+   * Moves one participant's current position, because they said so.
    *
-   * Deliberately not `postMessageFor`: that schedules analysis, and an
-   * intervention that triggered the analysis that produced the next
+   * An inferred change is refused here as well as dropped by the parser: the
+   * Agent is the authority on what may touch a position, and this is the rule
+   * that keeps a current position the participant's own. What is left to
+   * enforce beyond it is that the change is complete. A
+   * participant who names a new option without a new confidence has a position
+   * the decision cannot fully describe, so the confidence is cleared rather
+   * than carried over from the option they have just left, and the facilitator
+   * asks them for it. Answering is how the request is closed: the next
+   * analysis observes the number and comes back through here.
+   *
+   * A participant who never submitted can still acquire a position this way.
+   * Their initial submission stays absent — the current position is what the
+   * decision is made of, and it is not a submission.
+   */
+  private applyPositionChange(change: ObservedPositionChange, now: number): void {
+    if (!change.explicit) return;
+    const [current] = this.sql<{ option_id: string | null; confidence: number | null }>`
+      SELECT option_id, confidence FROM current_positions WHERE participant_id = ${change.participantId}
+    `;
+    const movedOption = change.optionId !== null && change.optionId !== current?.option_id;
+    const optionId = change.optionId ?? current?.option_id ?? null;
+    // A confidence they did not give is not one they still hold, if the option
+    // under it has changed.
+    const confidence = change.confidence ?? (movedOption ? null : (current?.confidence ?? null));
+    if (!movedOption && confidence === (current?.confidence ?? null)) return; // nothing moved
+
+    this.sql`
+      INSERT INTO current_positions (participant_id, option_id, confidence, updated_at)
+      VALUES (${change.participantId}, ${optionId}, ${confidence}, ${now})
+      ON CONFLICT (participant_id) DO UPDATE
+        SET option_id = excluded.option_id,
+            confidence = excluded.confidence,
+            updated_at = excluded.updated_at
+    `;
+
+    if (confidence === null) this.requestConfidence(change.participantId, now);
+    else {
+      this.sql`
+        DELETE FROM pending_participant_requests
+        WHERE participant_id = ${change.participantId} AND kind = ${"CONFIDENCE"}
+      `;
+    }
+  }
+
+  /**
+   * Asks a participant for the confidence their new position is missing.
+   *
+   * Deterministic rather than left to the model: the requirement is that the
+   * decision state stays complete, and a question the facilitator might or
+   * might not remember to ask does not keep it complete. Asked once — the
+   * pending request is what makes it once — because a facilitator that repeats
+   * the question every time it re-reads the discussion is the nagging the
+   * intervention gate exists to prevent.
+   */
+  private requestConfidence(participantId: string, now: number): void {
+    const [pending] = this.sql<{ id: string }>`
+      SELECT id FROM pending_participant_requests
+      WHERE participant_id = ${participantId} AND kind = ${"CONFIDENCE"}
+    `;
+    if (pending) return;
+
+    this.sql`
+      INSERT INTO pending_participant_requests (id, participant_id, kind, created_at)
+      VALUES (${crypto.randomUUID()}, ${participantId}, ${"CONFIDENCE"}, ${now})
+    `;
+    const [participant] = this.sql<{ display_name: string }>`
+      SELECT display_name FROM participants WHERE id = ${participantId}
+    `;
+    this.sql`
+      INSERT INTO messages (author_participant_id, body, created_at)
+      VALUES (${null}, ${`${participant!.display_name}, you've changed your position — how confident are you in it now, from 1 to 5?`}, ${now})
+    `;
+  }
+
+  /**
+   * The intervention gate, and the post if it opens.
+   *
+   * The facilitator observes continuously and intervenes selectively, so the
+   * question here is not whether it has something to say — it usually does —
+   * but whether saying it again would tell the team anything. An issue it has
+   * already raised is raised again only when the decision has materially moved
+   * underneath it since: a new or re-worded assumption, a crux appearing or
+   * resolving, a conflict opening or closing, someone changing position.
+   *
+   * That is `materialDigest`, taken *after* this analysis has been written, so
+   * it describes the decision the intervention would be made about. A
+   * re-analysis that understood the discussion the same way produces the same
+   * digest however differently the model words the intervention itself — which
+   * is the difference between this and refusing to repeat a string.
+   *
+   * Its known ceiling: the digest covers the whole facilitator model rather
+   * than the part belonging to one issue, so an unrelated development
+   * elsewhere in the decision can re-open an issue that has not itself moved.
+   * Linking each issue to the state it rests on would need the model to
+   * maintain that link across analyses, which is a good deal more to trust it
+   * with than an issue key.
+   *
+   * Posting is deliberately not `postMessageFor`: that schedules analysis, and
+   * an intervention that triggered the analysis that produced the next
    * intervention would be a facilitator talking to itself.
    */
-  private postIntervention(body: string, now: number): void {
+  private postIntervention(intervention: Intervention, now: number): void {
+    const digest = this.materialDigest();
+    const [prior] = this.sql<{ state_digest: string }>`
+      SELECT state_digest FROM facilitator_interventions
+      WHERE issue_key = ${intervention.issueKey} ORDER BY created_at DESC LIMIT 1
+    `;
+    if (prior && prior.state_digest === digest) return;
+
+    // A backstop for the same issue arriving under a new key: the model has
+    // re-worded the identifier, but not the message.
     const [last] = this.sql<{ body: string }>`
       SELECT body FROM messages WHERE author_participant_id IS NULL ORDER BY seq DESC LIMIT 1
     `;
-    // The crudest possible guard against repeating an intervention: refuse to
-    // say the same thing twice in a row. M5 owns the real question — whether
-    // the underlying issue has materially changed.
-    if (last?.body === body) return;
+    if (last?.body === intervention.message) return;
+
     this.sql`
       INSERT INTO messages (author_participant_id, body, created_at)
-      VALUES (${null}, ${body}, ${now})
+      VALUES (${null}, ${intervention.message}, ${now})
     `;
+    const [posted] = this.sql<{ seq: number }>`SELECT MAX(seq) AS seq FROM messages`;
+    this.sql`
+      INSERT INTO facilitator_interventions (id, issue_key, message_seq, state_digest, created_at)
+      VALUES (${crypto.randomUUID()}, ${intervention.issueKey}, ${posted!.seq}, ${digest}, ${now})
+    `;
+  }
+
+  /**
+   * What the decision materially consists of right now, as one string.
+   *
+   * Deliberately not a timestamp or a row count: both move whenever an
+   * analysis runs, and this has to stay still while the facilitator's
+   * understanding does. Statuses and text, because a re-worded assumption is a
+   * changed one — the facilitator is reading the discussion differently — but
+   * a re-worded *intervention* about an unchanged reading is not.
+   */
+  private materialDigest(): string {
+    const [digest] = this.sql<{ value: string }>`
+      SELECT
+        COALESCE((SELECT group_concat(s, '|') FROM
+          (SELECT statement || '~' || status AS s FROM facilitator_assumptions ORDER BY statement)), '') || '#' ||
+        COALESCE((SELECT group_concat(s, '|') FROM
+          (SELECT question || '~' || status AS s FROM facilitator_cruxes ORDER BY question)), '') || '#' ||
+        COALESCE((SELECT group_concat(s, '|') FROM
+          (SELECT description || '~' || status AS s FROM facilitator_conflicts ORDER BY description)), '') || '#' ||
+        COALESCE((SELECT group_concat(s, '|') FROM
+          (SELECT participant_id || '~' || COALESCE(option_id, '-') || '~' || COALESCE(confidence, '-') AS s
+           FROM current_positions ORDER BY participant_id)), '')
+        AS value
+    `;
+    return digest!.value;
   }
 
   private facilitatorMeta(): FacilitatorMetaRow | undefined {
@@ -776,9 +898,87 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       // Who has submitted is public during Submit; what they submitted is not.
       submittedParticipantIds: submissions.map((s) => s.participantId),
       submissions: decision.status === "SUBMIT" ? [] : submissions,
-      positions: this.positions(),
+      board: this.board(),
       messages: this.messages()
     };
+  }
+
+  /**
+   * The participant-facing board: current positions, cruxes, action items.
+   *
+   * A projection, computed on every read. Positions come from
+   * `current_positions`, the rest from the facilitator's state — there is no
+   * board table, because a board that is stored is a board that can disagree
+   * with the decision it describes.
+   *
+   * Assumptions and conflicts are deliberately absent. The facilitator holds
+   * more than it shows: an inferred assumption is a hypothesis about somebody,
+   * and a wall of them presented as a list reads as a verdict on how the team
+   * is thinking. They reach participants as questions, in the discussion, and
+   * as the challenged ones in the brief.
+   */
+  private board(): BoardView {
+    const positions = new Map(this.positions().map((p) => [p.participantId, p]));
+    const submitted = new Set(
+      this.sql<{ participant_id: string }>`
+        SELECT participant_id FROM initial_submissions
+      `.map((r) => r.participant_id)
+    );
+
+    return {
+      // Every participant, including those with no position: they are in the
+      // discussion, and showing them as absent is more honest than omitting them.
+      positions: this.participants().map((participant) => {
+        const position = positions.get(participant.id);
+        return {
+          participantId: participant.id,
+          displayName: participant.displayName,
+          optionId: position?.optionId ?? null,
+          confidence: position?.confidence ?? null,
+          submitted: submitted.has(participant.id)
+        };
+      }),
+      cruxes: this.cruxes(),
+      actionItems: this.actionItems()
+    };
+  }
+
+  /**
+   * Orientation on opening the decision, and the visit that moves the boundary.
+   *
+   * Called once per opening rather than on every realtime update — reading the
+   * brief *is* the visit, so a browser that re-read it whenever the projection
+   * moved would reset "since your last visit" to seconds ago and have nothing
+   * to report ever again.
+   *
+   * The visit is recorded after the brief is composed, so this brief describes
+   * what happened since the previous opening and the next one starts here.
+   */
+  @callable()
+  getCurrentStateBrief(): StateBrief {
+    const viewerId = this.viewerId();
+    return this.ctx.storage.transactionSync(() => {
+      const participants = this.participants();
+      const viewer = participants.find((p) => p.id === viewerId);
+      if (!viewer) throw new Error("unknown participant");
+
+      const brief = composeBrief({
+        decision: this.decision(),
+        viewer,
+        participants,
+        positions: this.positions(),
+        cruxes: this.cruxes(),
+        actionItems: this.actionItems(),
+        assumptions: this.assumptions(),
+        messages: this.messages(),
+        pendingRequests: this.pendingRequests(),
+        submittedCount: this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM initial_submissions`[0]!.n,
+        now: Date.now()
+      });
+
+      this.sql`UPDATE participants SET last_visited_at = ${brief.generatedAt} WHERE id = ${viewerId}`;
+      return brief;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -850,6 +1050,56 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
     }));
   }
 
+  private assumptions(): FacilitatorAssumption[] {
+    return this.sql<{
+      id: string;
+      participant_id: string | null;
+      statement: string;
+      source: string;
+      status: string;
+      first_seen_seq: number;
+      updated_at: number;
+    }>`SELECT * FROM facilitator_assumptions ORDER BY first_seen_seq, statement`.map((r) => ({
+      id: r.id,
+      participantId: r.participant_id,
+      statement: r.statement,
+      source: r.source as FacilitatorAssumption["source"],
+      status: r.status as FacilitatorAssumption["status"],
+      firstSeenSeq: r.first_seen_seq,
+      updatedAt: r.updated_at
+    }));
+  }
+
+  private interventions(): FacilitatorIntervention[] {
+    return this.sql<{
+      id: string;
+      issue_key: string;
+      message_seq: number;
+      state_digest: string;
+      created_at: number;
+    }>`SELECT * FROM facilitator_interventions ORDER BY created_at`.map((r) => ({
+      id: r.id,
+      issueKey: r.issue_key,
+      messageSeq: r.message_seq,
+      stateDigest: r.state_digest,
+      createdAt: r.created_at
+    }));
+  }
+
+  private pendingRequests(): PendingParticipantRequest[] {
+    return this.sql<{
+      id: string;
+      participant_id: string;
+      kind: string;
+      created_at: number;
+    }>`SELECT * FROM pending_participant_requests ORDER BY created_at`.map((r) => ({
+      id: r.id,
+      participantId: r.participant_id,
+      kind: r.kind as PendingParticipantRequest["kind"],
+      createdAt: r.created_at
+    }));
+  }
+
   private cruxes(): Crux[] {
     return this.sql<{
       id: string;
@@ -905,6 +1155,17 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
 function facilitatorStatus(meta: FacilitatorMetaRow | undefined): FacilitatorStatus {
   if (meta?.analysis_running) return "ANALYZING";
   return meta?.last_error ? "ERROR" : "IDLE";
+}
+
+/**
+ * When an item survives an analysis unchanged, it keeps the timestamp it had.
+ *
+ * Every run rewrites the whole facilitator model, so stamping `now` on each
+ * row would make everything look freshly changed — and "what has changed since
+ * your last visit" and the intervention gate both depend on the difference.
+ */
+function unchanged(prior: { updated_at: number } | undefined, same: boolean, now: number): number {
+  return prior && same ? prior.updated_at : now;
 }
 
 /** First occurrence wins. Two assumptions with the same text are one row. */

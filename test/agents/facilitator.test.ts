@@ -1,13 +1,17 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
+import {
+  context,
+  discussing,
+  messages,
+  projection,
+  refusedWith,
+  SILENT,
+  stubWorkflow,
+  type Agent
+} from "./harness.ts";
 import type { DecisionAgent } from "../../src/server/agents/decision.ts";
-import type {
-  DecisionRealtimeState,
-  FacilitatorAnalysisResult,
-  FacilitatorContext,
-  Message
-} from "../../src/shared/types.ts";
 
 /**
  * The facilitator boundary, in the real Workers runtime.
@@ -17,84 +21,11 @@ import type {
  * are current, and nothing the model can return that damages the decision or
  * blocks a participant. All of it is Durable Object behaviour, so none of it
  * can be demonstrated against a stand-in for the runtime.
+ *
+ * M5's own rules — position changes, the intervention gate, the board and the
+ * brief — are in intelligence.test.ts.
  */
 
-type Agent = DurableObjectStub<DecisionAgent>;
-
-/** An analysis that found nothing and has nothing to say. */
-const SILENT: FacilitatorAnalysisResult = {
-  analyzedThroughSeq: 0,
-  assumptions: [],
-  cruxes: [],
-  conflicts: [],
-  actionItems: [],
-  positionChanges: [],
-  intervention: null
-};
-
-/** Frames a decision, reveals it, and settles the Reveal analysis. */
-async function discussing(participants = ["Ada", "Grace"]) {
-  const agent = (await getAgentByName(env.DecisionAgent, crypto.randomUUID())) as Agent;
-  const framed = await agent.frameDecision({
-    question: "Ship in February or slip to March?",
-    options: ["Ship in February", "Slip to March"],
-    participants
-  });
-  const id = Object.fromEntries(framed.map((p) => [p.displayName, p.id]));
-  const scheduled = await stubWorkflow(agent);
-  await agent.declareCompleteFor(id.Ada!);
-  await agent.applyAnalysis(SILENT);
-  scheduled.length = 0;
-  return { agent, id, scheduled };
-}
-
-/** Records what the Agent hands to the Workflow, instead of running one. */
-async function stubWorkflow(agent: Agent, behaviour: "ok" | "throw" = "ok") {
-  const calls: { params: { type: string } }[] = [];
-  await runInDurableObject(agent, (instance) => {
-    const target = instance as unknown as { env: Record<string, unknown> };
-    target.env = {
-      ...target.env,
-      FACILITATOR_WORKFLOW: {
-        create: async (options: { params: { type: string } }) => {
-          calls.push(options);
-          if (behaviour === "throw") throw new Error("Workers AI is unavailable");
-          return { id: "stub" };
-        }
-      }
-    };
-  });
-  return calls;
-}
-
-function projection(agent: Agent): Promise<DecisionRealtimeState> {
-  return runInDurableObject(
-    agent,
-    (instance) => (instance as unknown as { state: DecisionRealtimeState }).state
-  );
-}
-
-function messages(agent: Agent): Promise<Message[]> {
-  return runInDurableObject(agent, (instance) =>
-    (instance as unknown as { messages(): Message[] }).messages()
-  );
-}
-
-function context(agent: Agent): Promise<FacilitatorContext> {
-  return runInDurableObject(agent, (instance) =>
-    (instance as unknown as DecisionAgent).getFacilitatorContext()
-  );
-}
-
-/** See decision-lifecycle.test.ts: `.rejects` breaks on Durable Object RPC. */
-async function refusedWith(call: Promise<unknown>): Promise<string> {
-  try {
-    await call;
-  } catch (e) {
-    return e instanceof Error ? e.message : String(e);
-  }
-  throw new Error("expected the Agent to refuse this call, but it resolved");
-}
 
 describe("the facilitator's view of the decision", () => {
   it("carries the discussion, the positions and its own working model", async () => {
@@ -181,7 +112,7 @@ describe("stale and duplicate results", () => {
     const { agent } = await discussing();
     // The Reveal analysis has already reported. A second report of it — a
     // retried Workflow step — must not be applied again.
-    expect(await agent.applyAnalysis({ ...SILENT, intervention: "Hello again." })).toBe(false);
+    expect(await agent.applyAnalysis({ ...SILENT, intervention: { issueKey: "again", message: "Hello again." } })).toBe(false);
     expect(await messages(agent)).toHaveLength(0);
   });
 
@@ -236,7 +167,7 @@ describe("applying an analysis", () => {
       ],
       actionItems: [{ description: "Pull the crash report breakdown", ownerParticipantId: id.Grace! }],
       positionChanges: [],
-      intervention: "Are you assuming the crash reports are not release-blocking, Ada?"
+      intervention: { issueKey: "crash-reports", message: "Are you assuming the crash reports are not release-blocking, Ada?" }
     });
 
     const view = await context(agent);
@@ -255,7 +186,7 @@ describe("applying an analysis", () => {
     await agent.postMessageFor(id.Ada!, "February still holds.");
     scheduled.length = 0;
 
-    await agent.applyAnalysis({ ...SILENT, analyzedThroughSeq: 1, intervention: "A question." });
+    await agent.applyAnalysis({ ...SILENT, analyzedThroughSeq: 1, intervention: { issueKey: "a-question", message: "A question." } });
 
     // The facilitator answering itself forever is the failure this prevents.
     expect(scheduled).toHaveLength(0);
@@ -265,9 +196,9 @@ describe("applying an analysis", () => {
   it("will not say the same thing twice in a row", async () => {
     const { agent, id } = await discussing();
     await agent.postMessageFor(id.Ada!, "One.");
-    await agent.applyAnalysis({ ...SILENT, analyzedThroughSeq: 1, intervention: "Are you assuming X?" });
+    await agent.applyAnalysis({ ...SILENT, analyzedThroughSeq: 1, intervention: { issueKey: "assuming-x", message: "Are you assuming X?" } });
     await agent.postMessageFor(id.Grace!, "Two.");
-    await agent.applyAnalysis({ ...SILENT, analyzedThroughSeq: 3, intervention: "Are you assuming X?" });
+    await agent.applyAnalysis({ ...SILENT, analyzedThroughSeq: 3, intervention: { issueKey: "assuming-x", message: "Are you assuming X?" } });
 
     expect((await messages(agent)).filter((m) => m.author.kind === "FACILITATOR")).toHaveLength(1);
   });
@@ -325,7 +256,7 @@ describe("AI failure", () => {
           }
         ],
         cruxes: [{ question: "Would have been stored", status: "OPEN" }],
-        intervention: "Would have been posted"
+        intervention: { issueKey: "would-have", message: "Would have been posted" }
       })
     );
 

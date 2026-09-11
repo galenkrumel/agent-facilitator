@@ -54,7 +54,7 @@ export const INFERENCE = { temperature: 0.2, max_tokens: 4096 } as const;
 const ANALYSIS_JSON_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["assumptions", "cruxes", "conflicts", "actionItems", "intervention"],
+  required: ["assumptions", "cruxes", "conflicts", "actionItems", "positionChanges", "intervention"],
   properties: {
     assumptions: {
       type: "array",
@@ -110,9 +110,42 @@ const ANALYSIS_JSON_SCHEMA = {
         }
       }
     },
+    positionChanges: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["participant", "option", "confidence", "explicit"],
+        properties: {
+          participant: { type: "string", description: "Exact display name." },
+          option: {
+            type: ["string", "null"],
+            description: "The option label they now hold, or null if only their confidence changed."
+          },
+          confidence: {
+            type: ["integer", "null"],
+            description: "Their new confidence 1–5, or null if they did not give one."
+          },
+          explicit: {
+            type: "boolean",
+            description: "True only if they said in so many words that they are changing position."
+          }
+        }
+      }
+    },
     intervention: {
-      type: ["string", "null"],
-      description: "A single message to post to the discussion, or null to stay silent."
+      type: ["object", "null"],
+      additionalProperties: false,
+      required: ["issue", "message"],
+      properties: {
+        issue: {
+          type: "string",
+          description:
+            "Short stable identifier for the underlying issue, e.g. 'contract-extension-availability'. " +
+            "Reuse the exact key of an earlier intervention when it is the same issue."
+        },
+        message: { type: "string", description: "A single message to post to the discussion." }
+      }
     }
   }
 } as const;
@@ -183,13 +216,39 @@ this list.
 ACTION ITEMS
 Only commitments someone actually made in the discussion.
 
+POSITION CHANGES
+A participant's current position is theirs to state, never yours to infer.
+
+Report a change only where someone has said, in so many words, that they are
+changing their position, holding a different option, or giving a new confidence
+— "I'm switching to B", "I'll move to 4 on that", "you've convinced me".
+Set explicit to true for exactly those.
+
+Reasoning that shifts, a concession, an acknowledgement that someone has a
+point, or an argument that now looks weaker is NOT a position change. If you
+find yourself deducing a change, it is not one: leave it out.
+
+- option: the label they now hold, or null if only their confidence changed.
+- confidence: the number they gave, or null if they did not give one. Do not
+  guess it — a change with no confidence is followed up automatically.
+
 INTERVENTION
 At most one short message, addressed to the team, posted into the discussion.
 Write it only when there is a specific, decision-relevant disagreement or
 assumption worth surfacing right now. Phrase an inferred assumption as a
 question to the person who appears to hold it — "Are you assuming X?", never
-"You are assuming X". Do not repeat an intervention you have already made
-unless the discussion has materially changed it.
+"You are assuming X".
+
+Give every intervention an issue key: a short, lowercase, hyphenated
+identifier for the underlying issue, not for the wording. When an earlier
+intervention was about the same issue, reuse its key exactly, even if you would
+now put it differently — rewording an issue does not make it a new one.
+
+You have already said what you have already said. Raise an issue you have
+raised before only when the discussion has since materially changed it: new
+evidence, someone moving, a claim conceded or refuted. Restating a live issue
+in fresh words because it is still unresolved is the single most damaging
+thing you can do, and the team will stop reading you.
 
 Set intervention to null if you have nothing worth saying. Silence is the
 correct answer far more often than not, and is always better than a generic
@@ -270,6 +329,17 @@ export function buildAnalysisPrompt(
           ...context.cruxes.map((c) => `- crux (${c.status}): ${c.question}`),
           ...context.conflicts.map((c) => `- conflict (${c.status}): ${c.description}`)
         ].join("\n")
+      : null,
+    context.interventions.length
+      ? `WHAT YOU HAVE ALREADY RAISED (issue key → the message you posted)\n` +
+        context.interventions
+          .map((i) => {
+            const posted = context.messages.find((m) => m.seq === i.messageSeq);
+            return `- ${i.issueKey} (message ${i.messageSeq}): ${posted?.body ?? "(posted)"}`;
+          })
+          .join("\n") +
+        `\nReuse a key for the same issue. Say nothing about one of these again unless the ` +
+        `discussion has materially changed it since the message it was raised at.`
       : null,
     type === "REVEAL"
       ? `TASK\nThe initial positions have just been revealed and the discussion has not started. ` +

@@ -120,6 +120,24 @@ export type FacilitatorMeta = {
   lastError: string | null;
 };
 
+/**
+ * An intervention the facilitator has already made, and what it was about.
+ *
+ * `issueKey` is the facilitator's own identifier for the underlying issue, so
+ * a second intervention about the same issue is recognisable as the same issue
+ * however differently it is worded. `stateDigest` is what the decision
+ * materially looked like when it was made — the Decision Agent compares the
+ * two to decide whether anything has changed enough to be worth saying again.
+ */
+export type FacilitatorIntervention = {
+  id: string;
+  issueKey: string;
+  /** The message it was posted as. */
+  messageSeq: number;
+  stateDigest: string;
+  createdAt: number;
+};
+
 /** An open question the facilitator has put to one participant (e.g. "what is
  *  your confidence now?") and is still waiting on. */
 export type PendingParticipantRequest = {
@@ -154,8 +172,11 @@ export type StateBrief = {
   /** Boundary for a returning brief: the participant's last visit. */
   since: number | null;
   generatedAt: number;
+  /** Neutral and factual. Never a recommendation, however implicit. */
   summary: string;
   openCruxes: string[];
+  /** Assumptions the discussion has challenged or refuted. Not a board category. */
+  challengedAssumptions: string[];
   questionsForYou: string[];
 };
 
@@ -185,8 +206,12 @@ export type DecisionBootstrap = {
   submittedParticipantIds: string[];
   /** Empty until Reveal, when every submission becomes a visible historical fact. */
   submissions: InitialSubmission[];
-  /** Empty until Reveal. Non-submitters never gain an entry. */
-  positions: CurrentPosition[];
+  /**
+   * The participant-facing board: current positions, cruxes, action items.
+   * Empty until Reveal, and the only positions the browser is given — a
+   * `CurrentPosition` row and its owner's name are never sent separately.
+   */
+  board: BoardView;
   /** The whole discussion, in sequence order. Empty until Reveal opens it. */
   messages: Message[];
 };
@@ -231,15 +256,32 @@ export type FacilitatorContext = {
   cruxes: Crux[];
   conflicts: Conflict[];
   actionItems: ActionItem[];
+  /** What the facilitator has already said, and about which issue. */
+  interventions: FacilitatorIntervention[];
   meta: FacilitatorMeta;
 };
 
-/** Only `explicit` position changes may update a current position. */
+/**
+ * A position change the facilitator believes it has observed.
+ *
+ * Only an `explicit` one may move a current position: reasoning that evolves
+ * is not a change of position. `null` means *unchanged* here — not "no
+ * position", as it does on `CurrentPosition` — so a participant who restates
+ * only their confidence leaves `optionId` null, and one who names only a new
+ * option leaves `confidence` null and is asked for a new one.
+ */
 export type ObservedPositionChange = {
   participantId: string;
   optionId: string | null;
   confidence: Confidence | null;
   explicit: boolean;
+};
+
+/** One message, with the facilitator's identifier for what it is about. */
+export type Intervention = {
+  /** Stable across analyses: the same underlying issue keeps the same key. */
+  issueKey: string;
+  message: string;
 };
 
 /** Validated model output. Carries its analyzed range so stale results can be
@@ -252,7 +294,7 @@ export type FacilitatorAnalysisResult = {
   actionItems: Omit<ActionItem, "id" | "createdAt">[];
   positionChanges: ObservedPositionChange[];
   /** Silence is a valid outcome. */
-  intervention: string | null;
+  intervention: Intervention | null;
 };
 
 export type ClosingMemo = {
