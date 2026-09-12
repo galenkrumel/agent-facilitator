@@ -214,9 +214,13 @@ export function parseAnalysis(output: unknown, context: FacilitatorContext): Fac
  * options, each line must name someone holding one, and a line that puts a
  * participant on an option they did not end up holding is dropped.
  *
- * `reasoning` gets none, and the prompt is what stands behind it — which is
- * worth being honest about rather than pretending a length check is a
- * grounding check.
+ * `reasoning` gets none. It is prose, and prose cannot be checked this way;
+ * what stands behind it is the prompt, the schema and the evaluation. That is
+ * an accepted limitation of this design, recorded as one in the README: the
+ * system grounds free-form reasoning at the prompt level and does not
+ * guarantee deterministic factual grounding of every sentence. The alternative
+ * is a second model judging the first, which is not validation — it is another
+ * untrusted output in the same position.
  *
  * The outcome is never read from `value`. It is copied from the closed
  * decision, which is what makes it structurally impossible for a memo to

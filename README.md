@@ -363,9 +363,9 @@ an invented disagreement in the permanent record is worse than a missing one.
 Only options somebody actually holds are checked, so a label like "Other" that
 nobody ended on does not become a word the memo may not contain.
 
-`reasoning` is the one field with no grounding. The prompt is what stands
-behind it, which is worth saying plainly rather than pretending a length check
-is a grounding check.
+`reasoning` is the one field with no deterministic grounding, and that is an
+accepted limitation rather than an oversight — see
+[Grounding limitation](#grounding-limitation-intentional-mvp) below.
 
 One function builds the known lists for both the prompt and the validator, so
 the model is never asked for something it would then be penalised for giving.
@@ -616,6 +616,32 @@ test.
 (reading 'edgesOut')`) resolving Vitest 4's optional peer graph, which
 `@cloudflare/vitest-pool-workers` requires. `npm ci` from the committed
 lockfile is unaffected; a fresh `npm install` on npm 10 is not.
+
+## Grounding limitation (intentional, MVP)
+
+**The system provides prompt-level grounding for free-form reasoning; it does
+not guarantee deterministic factual grounding of every sentence.**
+
+Everything the facilitator writes into durable state as a *list* is validated
+deterministically. An assumption, crux, conflict, action item or position
+change is matched back against the decision's own participants and options, and
+the closing memo's lists are selections from statements the facilitator already
+recorded. Dissent is grounded against the final positions. None of it can name
+somebody who is not here or an option nobody holds.
+
+Two fields are prose, and prose is not checkable that way: the closing memo's
+`reasoning`, and the facilitator's intervention message. What stands behind
+them is the prompt, the structured-output schema, and the model evaluation —
+not a validator. A sentence of `reasoning` that characterises the discussion
+slightly wrongly would be written into the permanent record.
+
+This is a deliberate boundary. Validating prose sentence by sentence means a
+second model judging the first one, which is not deterministic validation — it
+is another untrusted output in the same position, with the same failure mode
+and one more thing to be wrong. The cost of the boundary is bounded by what
+`reasoning` is allowed to be: a summary that sits beside the outcome, the
+lists and the transcript, all of which *are* grounded, and any of which a
+reader can check it against.
 
 ## Security limitation (intentional, MVP)
 
