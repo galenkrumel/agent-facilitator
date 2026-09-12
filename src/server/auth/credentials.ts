@@ -17,6 +17,24 @@ export async function hashCredential(credential: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** The token from an `Authorization: Bearer …` header, if there is one. */
+export function bearerToken(request: Request): string | null {
+  return request.headers.get("Authorization")?.match(/^Bearer +(\S+)$/)?.[1] ?? null;
+}
+
+/**
+ * Whether a presented token is the configured secret.
+ *
+ * Compared as hashes rather than as strings: two hashes are always the same
+ * length and differ from their first bytes, so how long the comparison takes
+ * says nothing about how much of the secret a guess got right.
+ */
+export async function matchesSecret(presented: string | null, secret: string): Promise<boolean> {
+  if (!presented) return false;
+  const [a, b] = await Promise.all([hashCredential(presented), hashCredential(secret)]);
+  return a === b;
+}
+
 export function base64url(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes))
     .replaceAll("+", "-")

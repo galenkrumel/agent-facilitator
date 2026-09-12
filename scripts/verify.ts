@@ -26,9 +26,14 @@
  *                                                           # for the memo
  *   node scripts/verify.ts history <decisionId>             # team history
  *
- * A link is the participant URL printed by `frame`. Requires the application
- * to be running (`npm run dev`); `/d/new` exists only in development.
+ * A link is the participant URL printed by `frame`, or one printed by
+ * `npm run seed`. It carries its own origin, so most commands need nothing
+ * else; `frame` and `history` talk to the application directly and use
+ * VERIFY_ORIGIN, which defaults to the dev server. `frame` creates a decision
+ * through the operator endpoint and so needs SEED_TOKEN; `history` is a
+ * development-only route and exists only under `npm run dev`.
  */
+import { existsSync } from "node:fs";
 import { sessionCookieName } from "../src/server/auth/sessions.ts";
 import type {
   ClosedDecisionRecord,
@@ -37,6 +42,11 @@ import type {
   DecisionRealtimeState,
   StateBrief
 } from "../src/shared/types.ts";
+
+if (existsSync(".env")) process.loadEnvFile(".env");
+
+/** Which application to drive. Every command but `frame` and `history` reads it from the link. */
+const ORIGIN = process.env.VERIFY_ORIGIN ?? "http://localhost:5173";
 
 const [command, ...args] = process.argv.slice(2);
 
@@ -213,9 +223,12 @@ async function settleMemo(client: Client, timeoutMs = 180_000): Promise<Decision
 switch (command) {
   case "frame": {
     const [question, participants, options] = args;
-    const response = await fetch("http://localhost:5173/d/new", {
+    const response = await fetch(new URL("/admin/decisions", ORIGIN), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.SEED_TOKEN ?? ""}`
+      },
       body: JSON.stringify({
         question,
         options: options!.split(","),
@@ -329,7 +342,7 @@ switch (command) {
   }
 
   case "history": {
-    const response = await fetch(`http://localhost:5173/team/history/${args[0]}`);
+    const response = await fetch(new URL(`/team/history/${args[0]}`, ORIGIN));
     if (!response.ok) throw new Error(`team history returned ${response.status}`);
     const record = (await response.json()) as ClosedDecisionRecord;
     console.log(
