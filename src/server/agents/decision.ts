@@ -3,6 +3,7 @@ import { DECISION_SCHEMA } from "../db/decision-schema.ts";
 import { hashCredential, newCredential } from "../auth/credentials.ts";
 import { newSessionId, readSessionId, SESSION_TTL_MS } from "../auth/sessions.ts";
 import { composeBrief } from "../domain/brief.ts";
+import { composeClosingAdvisory, significantLearnings } from "../domain/closing.ts";
 import { permissionsFor } from "../domain/decisions.ts";
 import { validateMessageBody } from "../domain/messages.ts";
 import { validateSubmission, type InitialSubmissionInput } from "../domain/submissions.ts";
@@ -10,6 +11,11 @@ import type { FacilitatorWorkflowParams } from "../workflows/facilitator.ts";
 import type {
   ActionItem,
   BoardView,
+  ClosedDecisionRecord,
+  ClosingAdvisory,
+  ClosingMemo,
+  ClosingMemoRecord,
+  ClosingMemoStatus,
   Confidence,
   Conflict,
   Crux,
@@ -79,6 +85,14 @@ type ParticipantRow = {
   is_owner: number;
   created_at: number;
   last_visited_at: number | null;
+};
+
+type ClosingMemoRow = {
+  status: ClosingMemoStatus;
+  memo: string | null;
+  failure: string | null;
+  requested_at: number;
+  completed_at: number | null;
 };
 
 type FacilitatorMetaRow = {
@@ -262,6 +276,41 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
     return this.getBootstrap();
   }
 
+  /** Owner-only. Declares the outcome and ends the decision. */
+  @callable()
+  async closeDecision(outcomeOptionId: string): Promise<DecisionBootstrap> {
+    await this.closeFor(this.viewerId(), outcomeOptionId);
+    return this.getBootstrap();
+  }
+
+  /**
+   * What the owner is warned about before closing.
+   *
+   * A separate read from `closeDecision`, and deliberately so: the owner has
+   * to be able to see the warning and close anyway. Nothing in the advisory
+   * reaches the close transaction, so there is no path by which an unresolved
+   * crux could delay or refuse a closure — which is the requirement, stated as
+   * a shape rather than as a rule.
+   *
+   * Owner-only because there is nothing here for anyone else. It is the only
+   * place assumptions and conflicts leave the Agent for a screen, and putting
+   * the facilitator's working model in front of every participant is exactly
+   * what the board is shaped to avoid.
+   */
+  @callable()
+  getClosingAdvisory(): ClosingAdvisory {
+    const viewerId = this.viewerId();
+    const viewer = this.participants().find((p) => p.id === viewerId);
+    if (!viewer?.isOwner) throw new Error("Only the owner can close this decision.");
+
+    return composeClosingAdvisory({
+      positions: this.board().positions,
+      cruxes: this.cruxes(),
+      conflicts: this.conflicts(),
+      assumptions: this.assumptions()
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Lifecycle. Each takes the participant explicitly rather than reading the
   // connection, so the transactional core can be driven directly by runtime
@@ -389,6 +438,173 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
     await this.scheduleAnalysis("DISCUSSION");
   }
 
+  /**
+   * The close transaction: the owner declares the outcome and the decision
+   * ends. DISCUSS → CLOSED, one atomic step.
+   *
+   * The outcome and the status move together in a single statement, so there
+   * is no instant — not even inside the transaction — at which a decision is
+   * CLOSED without the outcome its owner declared. That invariant is the whole
+   * reason the outcome is a parameter here rather than something set
+   * separately and then closed over.
+   *
+   * The pending memo row is written here too, for the same reason: a closed
+   * decision says immediately that a memo is coming, so a synthesis that never
+   * arrives reads as a synthesis that failed rather than as one nobody asked
+   * for. Nothing the facilitator holds is consulted — the advisory is advice,
+   * and an unresolved crux cannot keep a team in a decision they have finished
+   * having.
+   *
+   * Synchronous throughout, like every other mutation here: a Durable Object
+   * only interleaves at an `await`, so a message racing this one either
+   * commits first and is in the discussion the memo describes, or finds the
+   * decision closed and is refused. First committed wins, with no lock.
+   */
+  async closeFor(participantId: string, outcomeOptionId: string): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      const decision = this.decision();
+      if (decision.ownerParticipantId !== participantId) {
+        throw new Error("Only the owner can close this decision.");
+      }
+      if (decision.status !== "DISCUSS") {
+        throw new Error(
+          decision.status === "SUBMIT"
+            ? "This decision cannot be closed until its initial positions are revealed."
+            : "This decision is already closed."
+        );
+      }
+      if (!decision.options.some((o) => o.id === outcomeOptionId)) {
+        throw new Error("The outcome must be one of this decision's options.");
+      }
+
+      const now = Date.now();
+      this.sql`
+        UPDATE decisions
+        SET status = ${"CLOSED"}, closed_at = ${now}, outcome_option_id = ${outcomeOptionId}
+      `;
+      this.sql`
+        INSERT INTO closing_memos (id, status, requested_at) VALUES (1, ${"PENDING"}, ${now})
+      `;
+    });
+
+    this.publishProjection();
+    await this.scheduleClosingSynthesis();
+  }
+
+  /**
+   * Hands the closing memo to the Workflow, after the close has committed and
+   * outside its transaction — the same rule analysis follows, and for the same
+   * reason: AI is never inside a transaction, and a scheduling failure must
+   * not be able to undo a closure the team has already been shown.
+   *
+   * Deliberately not through `claimAnalysisSlot`. A discussion analysis can
+   * legitimately still be in flight at the moment the owner closes, and the
+   * closing memo is not that analysis — sharing the slot would mean a straggler
+   * run could delay or block the decision's permanent record. The memo row's
+   * own status is what makes this run once.
+   */
+  private async scheduleClosingSynthesis(): Promise<void> {
+    try {
+      await this.env.FACILITATOR_WORKFLOW.create({
+        params: { decisionId: this.name, type: "CLOSING" }
+      });
+    } catch (e) {
+      console.error(`could not schedule closing synthesis for decision ${this.name}`, e);
+      await this.failClosingMemo(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
+   * Commits the closing memo, and returns whether it was the one that landed.
+   *
+   * Written once. A memo that is already READY is never replaced — not by a
+   * retried Workflow step, not by a second instance that was scheduled and
+   * then resumed hours later, not by a failure report that arrives afterwards.
+   * That is what makes the memo immutable, and it is enforced here rather than
+   * upstream because the Agent is the only thing that knows what has already
+   * been committed.
+   *
+   * A memo that describes a different outcome is refused outright. It cannot
+   * normally happen — the outcome is copied out of this decision rather than
+   * generated — so it arriving means the memo is about some other state, and
+   * the one thing that must never be true is that a memo altered the outcome.
+   */
+  async applyClosingMemo(memo: ClosingMemo): Promise<boolean> {
+    const applied = this.ctx.storage.transactionSync(() => {
+      const row = this.closingMemoRow();
+      if (!row || row.status === "READY") return false;
+      if (memo.outcomeOptionId !== this.decision().outcomeOptionId) {
+        throw new Error("a closing memo cannot change the declared outcome");
+      }
+
+      this.sql`
+        UPDATE closing_memos
+        SET status = ${"READY"}, memo = ${JSON.stringify(memo)},
+            failure = NULL, completed_at = ${Date.now()}
+        WHERE id = 1
+      `;
+      return true;
+    });
+
+    this.publishProjection();
+    return applied;
+  }
+
+  /**
+   * Records that the closing memo could not be written.
+   *
+   * The decision stays closed and the outcome stays exactly as the owner
+   * declared it: the memo is a record of the decision, not a part of it. The
+   * team is told the synthesis failed, which is the honest thing to show and
+   * the only alternative to inventing one. A failure arriving after a valid
+   * memo has already been committed is ignored — a late straggler cannot
+   * demote a record that exists.
+   */
+  async failClosingMemo(reason: string): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      const row = this.closingMemoRow();
+      if (!row || row.status === "READY") return;
+      this.sql`
+        UPDATE closing_memos
+        SET status = ${"FAILED"}, failure = ${reason.slice(0, 500)}, completed_at = ${Date.now()}
+        WHERE id = 1
+      `;
+    });
+
+    this.publishProjection();
+  }
+
+  /**
+   * This decision as team history, or null while it has none.
+   *
+   * Null until the memo is READY: a history entry without the memo is a record
+   * of something that has not finished happening, and the Team Agent's write
+   * is idempotent by decision id, so a half-written one would be the version
+   * that stuck.
+   *
+   * The learnings are derived here, from authoritative facilitator state,
+   * rather than taken from the memo. The memo is the model's account of the
+   * decision; what the team carries forward should not be.
+   */
+  async getClosedDecisionRecord(): Promise<ClosedDecisionRecord | null> {
+    const record = this.closingMemoRecord();
+    if (record?.status !== "READY" || !record.memo) return null;
+
+    const decision = this.decision();
+    if (decision.closedAt === null) return null;
+    const outcome = decision.options.find((o) => o.id === decision.outcomeOptionId);
+
+    return {
+      decisionId: decision.id,
+      question: decision.question,
+      // By label: team history outlives the agent that could resolve an id.
+      outcome: outcome?.label ?? decision.outcomeOptionId ?? "(not recorded)",
+      closedAt: decision.closedAt,
+      memo: record.memo,
+      significantLearnings: significantLearnings(this.assumptions())
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Realtime
 
@@ -452,7 +668,12 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       // The last thing the team can see happening. Reveal is the first such
       // moment: before it there is only private submission, which is nobody
       // else's activity to observe.
-      lastActivityAt: counts!.last_message_at ?? decision.revealedAt
+      lastActivityAt: counts!.last_message_at ?? decision.revealedAt,
+      // The signal, never the memo. A browser that watches this go from
+      // PENDING to READY re-reads the decision and finds the memo waiting,
+      // which is how it appears without a refresh — and how a FAILED synthesis
+      // shows up as the failure it was rather than as a memo that never comes.
+      closingMemoStatus: this.closingMemoRow()?.status ?? null
     };
   }
 
@@ -533,21 +754,7 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       messages: this.messages(),
       assumptions: this.assumptions(),
       cruxes: this.cruxes(),
-      conflicts: this.sql<{
-        id: string;
-        description: string;
-        participant_ids: string;
-        status: string;
-        created_at: number;
-      }>`SELECT * FROM facilitator_conflicts ORDER BY created_at`.map(
-        (r): Conflict => ({
-          id: r.id,
-          description: r.description,
-          participantIds: JSON.parse(r.participant_ids),
-          status: r.status as Conflict["status"],
-          createdAt: r.created_at
-        })
-      ),
+      conflicts: this.conflicts(),
       actionItems: this.actionItems(),
       interventions: this.interventions(),
       meta: {
@@ -579,6 +786,22 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
     const outcome = this.ctx.storage.transactionSync(() => {
       const meta = this.facilitatorMeta();
       if (!meta || !meta.analysis_running) return { applied: false, pending: false };
+
+      // Committed order decides the close/analysis race, exactly as it decides
+      // the message/close one. An analysis whose inference finished after the
+      // owner closed is a reading of a decision that has since been frozen, so
+      // none of it lands: not a crux, not an intervention, not a position
+      // change. The closed decision is what was committed before the close,
+      // and the closing memo is written from that. The slot is released
+      // either way, and no follow-up is scheduled — there is nothing further
+      // to analyze.
+      if (this.decision().status !== "DISCUSS") {
+        this.sql`
+          UPDATE facilitator_meta
+          SET analysis_running = 0, analysis_pending = 0, last_error = NULL WHERE id = 1
+        `;
+        return { applied: false, pending: false };
+      }
 
       const stale = result.analyzedThroughSeq < meta.last_analyzed_seq;
       if (!stale) this.replaceFacilitatorState(result);
@@ -617,7 +840,10 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
         SET analysis_running = 0, analysis_pending = 0, last_error = ${reason.slice(0, 500)}
         WHERE id = 1
       `;
-      return meta?.analysis_pending === 1;
+      // Messages that arrived mid-run would normally earn a follow-up. Not
+      // once the decision is closed: there is nothing left to analyze, and a
+      // retry would only be refused by `applyAnalysis`.
+      return meta?.analysis_pending === 1 && this.decision().status === "DISCUSS";
     });
 
     this.publishProjection();
@@ -916,7 +1142,10 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       submittedParticipantIds: submissions.map((s) => s.participantId),
       submissions: decision.status === "SUBMIT" ? [] : submissions,
       board: this.board(),
-      messages: this.messages()
+      messages: this.messages(),
+      // Authoritative, and read the same way by a live browser and a refreshed
+      // one: the projection only ever said that this had moved.
+      closingMemo: this.closingMemoRecord()
     };
   }
 
@@ -1115,6 +1344,39 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
       kind: r.kind as PendingParticipantRequest["kind"],
       createdAt: r.created_at
     }));
+  }
+
+  private conflicts(): Conflict[] {
+    return this.sql<{
+      id: string;
+      description: string;
+      participant_ids: string;
+      status: string;
+      created_at: number;
+    }>`SELECT * FROM facilitator_conflicts ORDER BY created_at`.map((r) => ({
+      id: r.id,
+      description: r.description,
+      participantIds: JSON.parse(r.participant_ids),
+      status: r.status as Conflict["status"],
+      createdAt: r.created_at
+    }));
+  }
+
+  private closingMemoRow(): ClosingMemoRow | undefined {
+    return this.sql<ClosingMemoRow>`SELECT * FROM closing_memos WHERE id = 1`[0];
+  }
+
+  /** The memo and how its synthesis went, or null before the decision closes. */
+  private closingMemoRecord(): ClosingMemoRecord | null {
+    const row = this.closingMemoRow();
+    if (!row) return null;
+    return {
+      status: row.status,
+      memo: row.memo === null ? null : JSON.parse(row.memo),
+      failure: row.failure,
+      requestedAt: row.requested_at,
+      completedAt: row.completed_at
+    };
   }
 
   private cruxes(): Crux[] {

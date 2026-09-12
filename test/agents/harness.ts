@@ -3,6 +3,9 @@ import { getAgentByName } from "agents";
 import type { DecisionAgent } from "../../src/server/agents/decision.ts";
 import type {
   BoardView,
+  ClosingAdvisory,
+  ClosingMemo,
+  ClosingMemoRecord,
   CurrentPosition,
   DecisionRealtimeState,
   FacilitatorAnalysisResult,
@@ -98,6 +101,34 @@ export function positions(agent: Agent): Promise<CurrentPosition[]> {
   );
 }
 
+export function closingMemo(agent: Agent): Promise<ClosingMemoRecord | null> {
+  return runInDurableObject(agent, (instance) =>
+    (instance as unknown as { closingMemoRecord(): ClosingMemoRecord | null }).closingMemoRecord()
+  );
+}
+
+/** A memo the model might plausibly have produced, around a given outcome. */
+export function memo(outcomeOptionId: string, overrides: Partial<ClosingMemo> = {}): ClosingMemo {
+  return {
+    outcomeOptionId,
+    reasoning: "The team weighed the crash data against the cost of slipping.",
+    refutedAssumptions: [],
+    unresolvedIssues: [],
+    dissent: [],
+    actionItems: [],
+    ...overrides
+  };
+}
+
+/**
+ * Reads the advisory as one participant. Owner-only, and `getClosingAdvisory`
+ * reads the viewer from the connection, so the caller says who is asking —
+ * the same shape `brief` uses below.
+ */
+export function advisory(agent: Agent, participantId: string): Promise<ClosingAdvisory> {
+  return asViewer(agent, participantId, (target) => target.getClosingAdvisory());
+}
+
 /**
  * Reads the brief as one participant, which also records their visit.
  *
@@ -106,12 +137,33 @@ export function positions(agent: Agent): Promise<CurrentPosition[]> {
  * shape the lifecycle tests use for the transactional core.
  */
 export function brief(agent: Agent, participantId: string): Promise<StateBrief> {
+  return asViewer(agent, participantId, (target) => target.getCurrentStateBrief());
+}
+
+/**
+ * Runs one `@callable()` as a named participant, without a real connection.
+ *
+ * Structurally typed rather than as `DecisionAgent`: `viewerId` is private
+ * there, and intersecting a class with its own private member collapses the
+ * type to `never`.
+ */
+type Viewing = {
+  viewerId(): string;
+  getCurrentStateBrief(): StateBrief;
+  getClosingAdvisory(): ClosingAdvisory;
+};
+
+function asViewer<T>(
+  agent: Agent,
+  participantId: string,
+  read: (target: Viewing) => T
+): Promise<T> {
   return runInDurableObject(agent, (instance) => {
-    const target = instance as unknown as { viewerId(): string; getCurrentStateBrief(): StateBrief };
+    const target = instance as unknown as Viewing;
     const original = target.viewerId;
     target.viewerId = () => participantId;
     try {
-      return target.getCurrentStateBrief();
+      return read(target);
     } finally {
       target.viewerId = original;
     }

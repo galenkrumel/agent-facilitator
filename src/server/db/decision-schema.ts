@@ -128,6 +128,21 @@ CREATE TABLE IF NOT EXISTS facilitator_meta (
   last_error TEXT
 );
 
+-- Single row, created by the close transaction itself rather than by the
+-- synthesis that fills it in. A closed decision therefore always says where
+-- its memo has got to — pending, written, or failed — and never looks as
+-- though none was ever asked for. The row goes to READY once, and nothing
+-- afterwards may overwrite it: a retried or stale closing Workflow finds a
+-- memo already there and leaves it alone.
+CREATE TABLE IF NOT EXISTS closing_memos (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  status TEXT NOT NULL,                -- PENDING | READY | FAILED
+  memo TEXT,                           -- JSON ClosingMemo, only when READY
+  failure TEXT,                        -- only when FAILED
+  requested_at INTEGER NOT NULL,
+  completed_at INTEGER
+);
+
 -- Questions the facilitator has put to a participant and is still waiting on
 -- (e.g. confidence after an explicit position change).
 CREATE TABLE IF NOT EXISTS pending_participant_requests (

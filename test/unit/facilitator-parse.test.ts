@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { completionFrom, LIMITS, parseAnalysis } from "../../src/server/facilitator/parse.ts";
+import {
+  completionFrom,
+  LIMITS,
+  parseAnalysis,
+  parseClosingMemo
+} from "../../src/server/facilitator/parse.ts";
 import { TRANSCRIPT } from "../../evals/transcript.ts";
+import type { FacilitatorAssumption, FacilitatorContext } from "../../src/shared/types.ts";
 
 /**
  * The validation pipeline, which is the only thing standing between an
@@ -263,5 +269,241 @@ describe("unwrapping the runtime's envelope", () => {
   it("refuses an envelope with no completion in it", () => {
     expect(() => completionFrom({ usage: { total_tokens: 12 } })).toThrow(/no completion/);
     expect(() => completionFrom(null)).toThrow(/no completion/);
+  });
+});
+
+/**
+ * The closing memo's validation, which is a stricter job than the analysis's.
+ *
+ * A memo is the decision's permanent record. An analysis that gets something
+ * wrong is corrected by the next one; a memo that quietly gained a refuted
+ * assumption nobody ever refuted is what the team reads in six months. So the
+ * three list fields are validated by grounding — the model selects from the
+ * statements the facilitator actually recorded, and anything else is dropped.
+ */
+describe("parsing the closing memo", () => {
+  const assumption = (
+    statement: string,
+    status: FacilitatorAssumption["status"]
+  ): FacilitatorAssumption => ({
+    id: statement,
+    participantId: null,
+    statement,
+    source: "INFERRED",
+    status,
+    firstSeenSeq: 1,
+    updatedAt: 0
+  });
+
+  /** The transcript, closed on "stay with Arcus", with state to select from. */
+  const CLOSED: FacilitatorContext = {
+    ...TRANSCRIPT,
+    decision: { ...TRANSCRIPT.decision, status: "CLOSED", closedAt: 1, outcomeOptionId: "opt-2" },
+    assumptions: [
+      assumption("The Arcus contract cannot be extended month to month", "REFUTED"),
+      assumption("The migration is six weeks", "OPEN")
+    ],
+    cruxes: [
+      { id: "c1", question: "Can the contract be extended?", status: "OPEN", createdAt: 0, updatedAt: 0 },
+      { id: "c2", question: "Is Sam free?", status: "RESOLVED", createdAt: 0, updatedAt: 0 }
+    ],
+    conflicts: [
+      { id: "x1", description: "Priya and Marcus price the delay differently", participantIds: [], status: "OPEN", createdAt: 0 }
+    ],
+    actionItems: [{ id: "a1", description: "Ask Arcus about the renewal", ownerParticipantId: null, createdAt: 0 }]
+  };
+
+  function memo(overrides: Record<string, unknown> = {}) {
+    return {
+      reasoning: "The team weighed a 40k saving against six weeks of engineering it does not have.",
+      refutedAssumptions: ["The Arcus contract cannot be extended month to month"],
+      unresolvedIssues: ["Can the contract be extended?"],
+      dissent: ["Marcus still holds that the fee difference outweighs the migration cost."],
+      actionItems: ["Ask Arcus about the renewal"],
+      ...overrides
+    };
+  }
+
+  const parse = (value: unknown, context: FacilitatorContext = CLOSED) =>
+    parseClosingMemo(value, context);
+
+  it("accepts a well-formed memo and keeps every grounded field", () => {
+    expect(parse(memo())).toEqual({
+      outcomeOptionId: "opt-2",
+      reasoning: "The team weighed a 40k saving against six weeks of engineering it does not have.",
+      refutedAssumptions: ["The Arcus contract cannot be extended month to month"],
+      unresolvedIssues: ["Can the contract be extended?"],
+      dissent: ["Marcus still holds that the fee difference outweighs the migration cost."],
+      actionItems: ["Ask Arcus about the renewal"]
+    });
+  });
+
+  it("accepts the same thing as text, fence and preamble included", () => {
+    const json = JSON.stringify(memo());
+    expect(parse("```json\n" + json + "\n```").reasoning).toMatch(/40k/);
+  });
+
+  /**
+   * The one guarantee that has to hold whatever the model does: the outcome is
+   * copied from the closed decision, and there is no field on the response it
+   * could have come from.
+   */
+  it("takes the outcome from the decision, never from the model", () => {
+    expect(parse(memo({ outcomeOptionId: "opt-1", decision: "Move to Northwind" })).outcomeOptionId).toBe(
+      "opt-2"
+    );
+  });
+
+  it("refuses to write a memo for a decision with no declared outcome", () => {
+    expect(() => parse(memo(), TRANSCRIPT)).toThrow(/no declared outcome/);
+  });
+
+  it("drops a refuted assumption the facilitator never recorded", () => {
+    const result = parse(
+      memo({
+        refutedAssumptions: [
+          "The Arcus contract cannot be extended month to month",
+          "Northwind has a worse support team"
+        ]
+      })
+    );
+    expect(result.refutedAssumptions).toEqual([
+      "The Arcus contract cannot be extended month to month"
+    ]);
+  });
+
+  /** An assumption nobody disputed is not a refuted one, however true. */
+  it("drops an assumption that is real but was never challenged", () => {
+    expect(parse(memo({ refutedAssumptions: ["The migration is six weeks"] })).refutedAssumptions).toEqual(
+      []
+    );
+  });
+
+  it("drops an unresolved issue that was in fact resolved", () => {
+    expect(parse(memo({ unresolvedIssues: ["Is Sam free?"] })).unresolvedIssues).toEqual([]);
+  });
+
+  it("accepts an open conflict as an unresolved issue", () => {
+    expect(
+      parse(memo({ unresolvedIssues: ["Priya and Marcus price the delay differently"] }))
+        .unresolvedIssues
+    ).toEqual(["Priya and Marcus price the delay differently"]);
+  });
+
+  it("drops an action item nobody committed to", () => {
+    expect(parse(memo({ actionItems: ["Ship it in February"] })).actionItems).toEqual([]);
+  });
+
+  /** The model copies out of prose; a capital letter is not a different item. */
+  it("matches case- and space-insensitively, and keeps the facilitator's wording", () => {
+    expect(
+      parse(memo({ refutedAssumptions: ["  the arcus CONTRACT cannot be extended month to month "] }))
+        .refutedAssumptions
+    ).toEqual(["The Arcus contract cannot be extended month to month"]);
+  });
+
+  it("does not let a reworded item through", () => {
+    expect(
+      parse(memo({ refutedAssumptions: ["The Arcus contract can be extended after all"] }))
+        .refutedAssumptions
+    ).toEqual([]);
+  });
+
+  it("keeps one copy of an item the model listed twice", () => {
+    const listed = ["Ask Arcus about the renewal", "ask arcus about the renewal"];
+    expect(parse(memo({ actionItems: listed })).actionItems).toEqual(["Ask Arcus about the renewal"]);
+  });
+
+  it("bounds each list", () => {
+    const many = Array.from({ length: LIMITS.memoItems + 5 }, () => "Ask Arcus about the renewal");
+    expect(parse(memo({ actionItems: many })).actionItems).toHaveLength(1);
+  });
+
+  /**
+   * Dissent has no list to copy from, so it is grounded against the final
+   * positions: the team must have ended up disagreeing, each line must name
+   * somebody who is holding one of those positions, and nobody may be put on
+   * an option they did not end on. Priya and Dana end on "Stay with Arcus for
+   * another year" (opt-2, the outcome); Marcus ends on "Move to Northwind
+   * before Q3" (opt-1), and is therefore the one still dissenting.
+   */
+  it("keeps dissent when the final positions differ", () => {
+    expect(parse(memo()).dissent).toHaveLength(1);
+  });
+
+  it("keeps a line that names the position its participant actually holds", () => {
+    const grounded = ["Marcus still preferred Move to Northwind before Q3, at confidence 4."];
+    expect(parse(memo({ dissent: grounded })).dissent).toEqual(grounded);
+  });
+
+  it("drops dissent entirely when the team converged", () => {
+    const converged: FacilitatorContext = {
+      ...CLOSED,
+      positions: CLOSED.positions.map((p) => ({ ...p, optionId: "opt-2" }))
+    };
+    expect(parse(memo(), converged).dissent).toEqual([]);
+  });
+
+  /** Nobody to ask about it, and nobody it can be reported back to. */
+  it("drops a dissent line attributed to someone who is not in this decision", () => {
+    const invented = ["Sam still holds that the migration is the cheaper risk."];
+    expect(parse(memo({ dissent: invented })).dissent).toEqual([]);
+  });
+
+  /** Marcus ends on opt-1. A memo saying otherwise invents a disagreement. */
+  it("drops a dissent line that puts a participant on a position they did not hold", () => {
+    const misattributed = [
+      "Marcus still holds that Stay with Arcus for another year is the safer bet."
+    ];
+    expect(parse(memo({ dissent: misattributed })).dissent).toEqual([]);
+  });
+
+  it("keeps the grounded lines and drops only the unsupported ones", () => {
+    const mixed = [
+      "Marcus still holds that the fee difference outweighs the migration cost.",
+      "Sam never came round to it."
+    ];
+    expect(parse(memo({ dissent: mixed })).dissent).toEqual([mixed[0]]);
+  });
+
+  /**
+   * "Other" is an option nobody ended on, so it is not a position in final
+   * state and not something a line can be checked against — otherwise the word
+   * itself would be unsayable in a memo.
+   */
+  it("does not read an option nobody holds as a misattributed position", () => {
+    const prose = ["Marcus and Priya each priced the delay against the other."];
+    expect(parse(memo({ dissent: prose })).dissent).toEqual(prose);
+  });
+
+  it("refuses a memo with no reasoning at all", () => {
+    expect(() => parse(memo({ reasoning: "   " }))).toThrow(/reasoning/);
+    expect(() => parse(memo({ reasoning: 12 }))).toThrow(/reasoning/);
+  });
+
+  it("refuses reasoning long enough to be the transcript again", () => {
+    expect(() => parse(memo({ reasoning: "x".repeat(LIMITS.reasoning + 1) }))).toThrow(/too long/);
+  });
+
+  it("refuses a response that is not an object", () => {
+    // Text without braces fails a step earlier than a value the runtime has
+    // already parsed for us. Both are refusals.
+    expect(() => parse("[]")).toThrow(/no JSON object/);
+    expect(() => parse([1, 2, 3])).toThrow(/not an object/);
+  });
+
+  it("treats a missing list as an empty one", () => {
+    const result = parse({ reasoning: "They weighed the saving against the capacity." });
+    expect(result.refutedAssumptions).toEqual([]);
+    expect(result.unresolvedIssues).toEqual([]);
+    expect(result.actionItems).toEqual([]);
+  });
+
+  it("refuses a list that is not an array", () => {
+    expect(() => parse(memo({ actionItems: "Ask Arcus about the renewal" }))).toThrow(/must be an array/);
+  });
+
+  it("refuses a list with a non-string in it", () => {
+    expect(() => parse(memo({ refutedAssumptions: [42] }))).toThrow(/must contain strings/);
   });
 });

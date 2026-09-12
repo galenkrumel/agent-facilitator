@@ -5,7 +5,7 @@ discusses openly. A neutral AI facilitator helps the team surface conflicting
 assumptions — it does not make the decision, recommend an option, or coach
 participants.
 
-> **Implementation status: M5 (decision intelligence).**
+> **Implementation status: M6 (closing, decision outcome & history).**
 > The deployment path is in place (M0) and a decision can be framed and opened
 > through a participant link (M1). A participant submits a private initial
 > position, and the decision reveals — automatically once everyone has
@@ -18,9 +18,12 @@ participants.
 > participant-facing board, applies the position changes participants state
 > explicitly, asks for a confidence a change did not carry, holds back an
 > intervention on an issue nothing has happened to, and writes each participant
-> a Current State Brief on opening (M5). Closing and team history are built in
-> M6–M8; the full documentation required by M8 replaces this file's later
-> sections.
+> a Current State Brief on opening (M5). The owner can now declare an outcome
+> and close the decision, after which it is read-only: the facilitator writes a
+> closing memo around the outcome without being able to change it, and the
+> closed decision is filed in the Team Agent's history (M6). Seeded demo
+> creation and the full documentation required by M8 are M7–M8; the latter
+> replaces this file's later sections.
 
 ## Architecture (as configured)
 
@@ -105,8 +108,7 @@ commits. No AI failure can undo a transition participants have already seen.
 Once revealed, the decision has one shared thread. Messages are chronological,
 immutable and flat: no nested replies, no `@mentions`, no editing, no deletion.
 Participants address each other by name and correct themselves in a follow-up.
-There is no deadline; the discussion runs until the owner closes the decision
-(M6).
+There is no deadline; the discussion runs until the owner closes the decision.
 
 A message's canonical order is its `seq`, allocated by SQLite inside the same
 synchronous transaction that writes it — never the browser's clock. Messages
@@ -306,6 +308,103 @@ all its reading of the discussion. What is deterministic is the summarising.
 Before the Reveal the brief says how many have submitted and nothing about what
 they submitted.
 
+## Closing
+
+The owner declares the outcome and closes the decision. The status and the
+outcome move in one statement inside one transaction, so there is no instant at
+which a decision is `CLOSED` without the outcome its owner declared — the
+invariant the transaction exists for. The facilitator has no say in it: closing
+takes the outcome as an argument, and there is no code path by which a model
+could supply one.
+
+Before closing, the owner reads a **closing advisory** — the unresolved cruxes
+and conflicts, the assumptions the discussion challenged or refuted, and
+whether the team ever converged. It is composed from state the facilitator
+already holds, so it introduces nothing, and it is a separate read from the
+close: the owner has to be able to see the warning and close anyway. Nothing in
+it reaches the close transaction, so there is no path by which an open crux
+could delay a closure. It is also the only place assumptions and conflicts
+leave the Agent for a screen — the board deliberately shows neither.
+
+Dissent, in the advisory, is every held position when the team holds more than
+one — never a minority. Which side is the minority is exactly what this product
+must not point at.
+
+Once closed the decision is read-only: no messages, no submissions, no second
+reveal, no reopen. An analysis whose inference finished *after* the close
+commits lands nothing at all — not a crux, not an intervention, not a position
+change. Committed order decides, the same way it decides a message racing a
+close, and the Durable Object's single thread is what establishes it. There is
+no lock.
+
+### The closing memo
+
+Closing schedules a short-lived Workflow that writes a memo around the outcome.
+The memo carries the outcome only so the Agent can refuse one that disagrees:
+it is copied from the closed decision, and the model is never asked for it, so
+"the facilitator never chooses the outcome" is a shape rather than a rule
+something has to check.
+
+Its list fields are *selections*, not compositions. The prompt hands the model
+the exact statements the facilitator recorded — the challenged and refuted
+assumptions, the open cruxes and conflicts, the commitments — and asks it to
+copy across the ones that belong in the record. Each string that comes back is
+matched against that set and dropped if it matches nothing, so the memo can
+lose an item but cannot gain one. The model's judgement is *which* of them
+mattered; that judgement is why it is asked at all.
+
+`dissent` has no list to copy from — who still disagreed is a reading of the
+discussion, not a row in the working model — so it is grounded against the
+final positions instead. A team whose positions agreed has no dissent to
+report, whatever the model wrote; each line must name a participant who is
+holding one of the positions the team split across; and a line that puts a
+named participant on an option they did not end up holding is dropped, because
+an invented disagreement in the permanent record is worse than a missing one.
+Only options somebody actually holds are checked, so a label like "Other" that
+nobody ended on does not become a word the memo may not contain.
+
+`reasoning` is the one field with no deterministic grounding, and that is an
+accepted limitation rather than an oversight — see
+[Grounding limitation](#grounding-limitation-intentional-mvp) below.
+
+One function builds the known lists for both the prompt and the validator, so
+the model is never asked for something it would then be penalised for giving.
+
+The memo row is written by the close transaction itself, as `PENDING`, so a
+closed decision says immediately that a memo is coming — a synthesis that never
+arrives then reads as one that failed rather than as one nobody asked for. It
+goes to `READY` once and nothing afterwards may overwrite it: a retried
+Workflow step, a duplicate instance, or a failure report arriving late all find
+a memo already there and leave it alone. A failure leaves the decision closed
+and the outcome exactly as declared.
+
+The projection gains one field, `closingMemoStatus`, and it is a signal rather
+than content: a browser that watches it move from `PENDING` to `READY` re-reads
+the decision and finds the memo waiting. The memo itself never rides on the
+broadcast. It is deliberately *not* the existing `facilitatorStatus` — a
+discussion analysis can legitimately still be in flight when the owner closes,
+and the two are unrelated processes that must not share a slot.
+
+### Team history
+
+Once the memo is committed, the Workflow's last step files the closed decision
+in the `TeamAgent`: the question, the outcome by label, the memo, and the
+**significant learnings** — the assumptions the discussion challenged or
+refuted. Those are derived from authoritative facilitator state rather than
+taken from the memo: the memo is the model's account of the decision, and what
+the team carries forward should not be.
+
+The write is idempotent by decision id, because the step can be replayed after
+it has already succeeded. The Team Agent is an archive, not an index: it has no
+search, no ranking and no retrieval beyond reading one decision back by id, and
+its read is a plain Durable Object RPC rather than a `@callable()` — it has no
+participant or session model, so nothing it holds may reach a browser.
+
+The MVP has one implicit team, addressed by the constant `DEFAULT_TEAM_ID`.
+There is no team-creation path yet, so inventing team plumbing to support
+closing would be building the container before anything can fill it; M7
+introduces real team identity alongside the seeding that will create teams.
+
 ## Model evaluation
 
 The requirements name Llama 3.3 *subject to* an evaluation against a scripted
@@ -370,6 +469,10 @@ node scripts/verify.ts submit <link> opt-2 3 "…"
 node scripts/verify.ts say    <link> "…"        # posts, waits for the facilitator
 node scripts/verify.ts state  <link>
 node scripts/verify.ts watch  <link> 90         # every push, unprompted
+node scripts/verify.ts advise <link>            # the owner's pre-close warning
+node scripts/verify.ts close  <link> opt-1      # declares the outcome, waits
+                                                # for the closing memo
+node scripts/verify.ts history <decisionId>     # what the Team Agent kept
 ```
 
 It speaks the Agents SDK's RPC frames over its own WebSocket with its own
@@ -378,7 +481,14 @@ session cookie is named per decision, so two people in one decision cannot
 share a browser profile. Open the other participant's link in a browser and
 the pair covers the whole loop — reveal, analysis, board, a realtime update
 arriving somewhere it was not caused, a position change, the confidence
-follow-up, selectivity, refresh, and the returning brief.
+follow-up, selectivity, refresh, the returning brief, and then the close: the
+advisory, the declared outcome, the memo landing on the other participant's
+screen without a refresh, and the closed decision refusing everything.
+
+`history` reads the Team Agent back over the wire through a development-only
+route, guarded by `import.meta.env.DEV` exactly as `/d/new` is — so it is
+eliminated from the deployed Worker rather than merely refused there. It is
+verification infrastructure, not a product API.
 
 It needs `npm run dev`, because `/d/new` exists only in development; a deployed
 instance has no way to create a decision until M7 seeds one.
@@ -486,8 +596,9 @@ token.
 Two Vitest projects, because the suites need different runtimes.
 
 `test/unit` is plain Node: pure domain rules (submission and message
-validation, the authorization table), the facilitator's output validator, and
-the Node-side setup script.
+validation, the authorization table, the closing advisory and its notion of
+dissent), the facilitator's output validators for both an analysis and a
+closing memo, and the Node-side setup script.
 
 `test/agents` runs **inside workerd**, via `@cloudflare/vitest-pool-workers`,
 against a real Durable Object and its real SQLite. Atomicity, Durable Object
@@ -495,8 +606,9 @@ serialization, race determinism and post-commit Workflow scheduling are claims
 about the runtime, so they are tested in it rather than against a stand-in. The
 `FacilitatorWorkflow` is the one thing doubled: the tests drive the Agent side
 of the boundary directly — claiming and releasing the analysis slot, applying,
-refusing a stale result, rolling back a bad one — while `npm run eval` covers
-the model itself. Neither project needs Cloudflare credentials: the pool runs
+refusing a stale result, rolling back a bad one, closing atomically, refusing
+an analysis that arrives after the close, committing a memo once — while
+`npm run eval` covers the model itself. Neither project needs Cloudflare credentials: the pool runs
 with remote bindings off, which is also why the model is not called from a
 test.
 
@@ -504,6 +616,32 @@ test.
 (reading 'edgesOut')`) resolving Vitest 4's optional peer graph, which
 `@cloudflare/vitest-pool-workers` requires. `npm ci` from the committed
 lockfile is unaffected; a fresh `npm install` on npm 10 is not.
+
+## Grounding limitation (intentional, MVP)
+
+**The system provides prompt-level grounding for free-form reasoning; it does
+not guarantee deterministic factual grounding of every sentence.**
+
+Everything the facilitator writes into durable state as a *list* is validated
+deterministically. An assumption, crux, conflict, action item or position
+change is matched back against the decision's own participants and options, and
+the closing memo's lists are selections from statements the facilitator already
+recorded. Dissent is grounded against the final positions. None of it can name
+somebody who is not here or an option nobody holds.
+
+Two fields are prose, and prose is not checkable that way: the closing memo's
+`reasoning`, and the facilitator's intervention message. What stands behind
+them is the prompt, the structured-output schema, and the model evaluation —
+not a validator. A sentence of `reasoning` that characterises the discussion
+slightly wrongly would be written into the permanent record.
+
+This is a deliberate boundary. Validating prose sentence by sentence means a
+second model judging the first one, which is not deterministic validation — it
+is another untrusted output in the same position, with the same failure mode
+and one more thing to be wrong. The cost of the boundary is bounded by what
+`reasoning` is allowed to be: a summary that sits beside the outcome, the
+lists and the transcript, all of which *are* grounded, and any of which a
+reader can check it against.
 
 ## Security limitation (intentional, MVP)
 

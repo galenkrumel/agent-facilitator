@@ -16,10 +16,12 @@
  * Pure, and free of Cloudflare imports: `npm run eval` scores the same
  * validator the product runs.
  */
+import { closingKnownState, dissentingPositions } from "../domain/closing.ts";
 import { MAX_MESSAGE_LENGTH, validateMessageBody } from "../domain/messages.ts";
 import type {
   AssumptionSource,
   AssumptionStatus,
+  ClosingMemo,
   Confidence,
   Conflict,
   FacilitatorAnalysisResult,
@@ -38,7 +40,11 @@ export const LIMITS = {
   cruxes: 10,
   conflicts: 10,
   actionItems: 10,
-  positionChanges: 10
+  positionChanges: 10,
+  /** Per list on the closing memo. */
+  memoItems: 20,
+  /** The memo's reasoning is a few paragraphs, not the transcript again. */
+  reasoning: 4000
 } as const;
 
 /** An issue key is an identifier, not a sentence. */
@@ -187,6 +193,168 @@ export function parseAnalysis(output: unknown, context: FacilitatorContext): Fac
     positionChanges,
     intervention: intervention(value.intervention)
   };
+}
+
+/**
+ * Turns the model's closing synthesis into a `ClosingMemo`, or throws.
+ *
+ * The same four stages as an analysis, with a stricter middle: the memo is the
+ * decision's permanent record, and a record that quietly gained a refuted
+ * assumption nobody ever refuted is worse than no record at all.
+ *
+ * So the three list fields are validated by *grounding* rather than by shape.
+ * The prompt gave the model the exact statements the facilitator recorded and
+ * asked it to copy the ones that matter; each string that comes back is looked
+ * up in that set, and anything that is not there is dropped. What survives is
+ * the statement as the facilitator worded it, not as the model retyped it —
+ * so the memo and the state it was written from cannot drift apart.
+ *
+ * `dissent` has no list to copy from, so it is grounded against the final
+ * positions instead: the team must actually have ended up holding different
+ * options, each line must name someone holding one, and a line that puts a
+ * participant on an option they did not end up holding is dropped.
+ *
+ * `reasoning` gets none. It is prose, and prose cannot be checked this way;
+ * what stands behind it is the prompt, the schema and the evaluation. That is
+ * an accepted limitation of this design, recorded as one in the README: the
+ * system grounds free-form reasoning at the prompt level and does not
+ * guarantee deterministic factual grounding of every sentence. The alternative
+ * is a second model judging the first, which is not validation — it is another
+ * untrusted output in the same position.
+ *
+ * The outcome is never read from `value`. It is copied from the closed
+ * decision, which is what makes it structurally impossible for a memo to
+ * change the outcome the owner declared.
+ */
+export function parseClosingMemo(output: unknown, context: FacilitatorContext): ClosingMemo {
+  const value = typeof output === "string" ? (JSON.parse(extractJson(output)) as unknown) : output;
+  if (!isRecord(value)) throw new Error("the model returned JSON that is not an object");
+
+  const outcomeOptionId = context.decision.outcomeOptionId;
+  // The Agent will refuse the memo anyway; failing here means the Workflow
+  // never spends an inference on a decision that has no outcome to write about.
+  if (!outcomeOptionId) throw new Error("this decision has no declared outcome");
+
+  const known = closingKnownState(context);
+  return {
+    outcomeOptionId,
+    reasoning: prose(value.reasoning, "reasoning"),
+    refutedAssumptions: grounded(value.refutedAssumptions, known.refutedAssumptions, "refutedAssumptions"),
+    unresolvedIssues: grounded(value.unresolvedIssues, known.unresolvedIssues, "unresolvedIssues"),
+    dissent: groundedDissent(value.dissent, context),
+    actionItems: grounded(value.actionItems, known.actionItems, "actionItems")
+  };
+}
+
+/**
+ * Keeps only the entries that are things the facilitator actually recorded,
+ * in the facilitator's own words.
+ *
+ * Matched on trimmed, case-insensitive text — the model copies strings out of
+ * prose, and a capital letter is not a different assumption. Anything else is
+ * dropped rather than throwing: one reworded line should cost the team that
+ * line, not the whole memo, and a retry would very likely reword it again.
+ */
+function grounded(value: unknown, known: string[], at: string): string[] {
+  const canonical = new Map(known.map((k) => [k.trim().toLowerCase(), k]));
+  const kept = new Map<string, string>();
+
+  for (const raw of (array(value, at, "string") as unknown[]).slice(0, LIMITS.memoItems)) {
+    if (typeof raw !== "string") throw new Error(`${at} must contain strings`);
+    const match = canonical.get(raw.trim().toLowerCase());
+    if (match === undefined) {
+      // Worth a line: a dropped entry is something the model thought belonged
+      // in the permanent record, and its absence is otherwise unexplained.
+      console.log(`dropped an ungrounded ${at} entry: ${raw.slice(0, 120)}`);
+      continue;
+    }
+    kept.set(match, match);
+  }
+  return [...kept.values()];
+}
+
+/**
+ * Keeps only the dissent lines that the final state can support.
+ *
+ * Dissent is the one memo list with nothing to copy from — who still disagreed
+ * and about what is a reading of the discussion, not a row in the working
+ * model — so it is grounded against the positions the team actually ended on:
+ *
+ *   1. The team must be holding more than one option at all. A team that
+ *      converged has no dissent to report, whatever the model wrote.
+ *   2. Each line must name a participant who is holding one of them. A line
+ *      about somebody who is not in this decision is about nothing.
+ *   3. A line may not put a named participant on an option they did not end up
+ *      holding. "Marcus still preferred staying" is a fabrication when
+ *      Marcus's final position is to move — and an invented disagreement is
+ *      worse in the permanent record than a missing one, because the team
+ *      reads it in six months as something that happened.
+ *
+ * Only options somebody actually holds are checked in (3): an option nobody
+ * ended on is not a position in final state, and matching against it would
+ * turn a label like "Other" into a word the memo may not contain.
+ *
+ * Dropped rather than thrown, like every other grounding failure here: one
+ * unsupported line should cost the team that line, not the whole memo.
+ */
+function groundedDissent(value: unknown, context: FacilitatorContext): string[] {
+  const dissenting = dissentingPositions(context.positions);
+  if (!dissenting.length) return [];
+
+  const displayName = new Map(context.participants.map((p) => [p.id, p.displayName]));
+  const holders = dissenting.flatMap((p) => {
+    const name = displayName.get(p.participantId);
+    return name && p.optionId ? [{ name, optionId: p.optionId }] : [];
+  });
+  const heldOptions = context.decision.options.filter((o) =>
+    holders.some((h) => h.optionId === o.id)
+  );
+
+  const kept: string[] = [];
+  for (const line of lines(value, "dissent")) {
+    const named = holders.filter((h) => mentions(line, h.name));
+    const misattributed = heldOptions.filter(
+      (o) => mentions(line, o.label) && !named.some((h) => h.optionId === o.id)
+    );
+
+    if (!named.length || misattributed.length) {
+      // Worth a line: a dropped entry is a disagreement the model thought the
+      // record should carry, and its absence is otherwise unexplained.
+      console.log(
+        `dropped an ungrounded dissent entry (${
+          named.length ? "attributes a position they did not hold" : "names nobody holding a position"
+        }): ${line.slice(0, 120)}`
+      );
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept;
+}
+
+/**
+ * Whether a line refers to a name or a label, as a whole word: the model
+ * retypes both out of prose, so matching is case-insensitive, but "Ada" is not
+ * "Adam" and "Stay with Arcus" is not "Stayed with Arcus".
+ */
+function mentions(line: string, term: string): boolean {
+  const escaped = term.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "iu").test(line);
+}
+
+/** Free prose the model composed. Bounded, and required to be something. */
+function prose(value: unknown, at: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${at} must be a non-empty string`);
+  const trimmed = value.trim();
+  if (trimmed.length > LIMITS.reasoning) throw new Error(`${at} is too long`);
+  return trimmed;
+}
+
+/** A short list of the model's own lines. Bounded per line and per list. */
+function lines(value: unknown, at: string): string[] {
+  return array(value, at, "string")
+    .slice(0, LIMITS.memoItems)
+    .map((raw, i) => statement(raw, `${at}[${i}]`));
 }
 
 /**

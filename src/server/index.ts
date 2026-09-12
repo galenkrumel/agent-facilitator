@@ -1,5 +1,6 @@
 import { getAgentByName, routeAgentRequest } from "agents";
 import type { FrameDecisionInput } from "./agents/decision.ts";
+import { DEFAULT_TEAM_ID } from "./agents/team.ts";
 import { DECISION_ID_PATTERN, sessionCookie } from "./auth/sessions.ts";
 
 export { DecisionAgent } from "./agents/decision.ts";
@@ -16,6 +17,21 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const [root, decisionId, p, credential] = url.pathname.split("/").filter(Boolean);
+
+    // End-to-end verification infrastructure, not a product API. It is how
+    // `scripts/verify.ts` reads back what the closing Workflow wrote to the
+    // Team Agent, which is otherwise unreachable over the wire — and
+    // deliberately so: the Team Agent has no participant or session model, so
+    // nothing it holds may be exposed to a browser.
+    //
+    // Guarded exactly the way `/d/new` is. `import.meta.env.DEV` is a
+    // build-time constant, so this branch is eliminated from the deployed
+    // Worker rather than merely refused there.
+    if (import.meta.env.DEV && root === "team" && decisionId === "history" && p) {
+      const team = await getAgentByName(env.TeamAgent, DEFAULT_TEAM_ID);
+      const record = await team.getClosedDecision(p);
+      return record ? Response.json(record) : new Response("Not found", { status: 404 });
+    }
 
     if (root === "d") {
       // A development fixture, not a product API. The plan (§4.1) rejects a

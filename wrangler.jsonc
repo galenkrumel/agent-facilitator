@@ -13,12 +13,16 @@
   // swallowed by the SPA fallback:
   //   /agents/* — Agents SDK RPC + realtime transport
   //   /d/*      — participant links (/d/:decisionId/p/:credential), M1
+  //   /team/*   — the development-only team history read, M6. The route is
+  //               eliminated from the deployed Worker by `import.meta.env.DEV`;
+  //               this entry only keeps the asset handler from swallowing it
+  //               during `npm run dev`, and falls through to the SPA otherwise.
   // The ASSETS binding lets the Worker serve the SPA shell for the /d/* routes
   // it owns, after it has handled the participant link.
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*", "/d/*"]
+    "run_worker_first": ["/agents/*", "/d/*", "/team/*"]
   },
 
   // Both agents are SQLite-backed Durable Objects. The Decision Agent is the

@@ -26,6 +26,17 @@ import type { FacilitatorAnalysisResult } from "../../src/shared/types.ts";
  * that arrives by hand is the only way to say precisely what was understood.
  */
 
+/**
+ * Puts a millisecond between a visit and what happens next.
+ *
+ * The brief's boundary is strict — something "since your last visit" has to
+ * have happened *after* it — and these tests run fast enough to post a message
+ * in the same millisecond as the read that recorded the visit, which then
+ * legitimately counts as nothing having happened. In a real decision the two
+ * are minutes or hours apart.
+ */
+const afterTheVisit = () => new Promise((resolve) => setTimeout(resolve, 2));
+
 const facilitatorMessages = async (agent: Agent) =>
   (await messages(agent)).filter((m) => m.author.kind === "FACILITATOR").map((m) => m.body);
 
@@ -379,6 +390,7 @@ describe("the current state brief", () => {
   it("summarises what has changed since the last opening, not the last message", async () => {
     const { agent, id } = await discussing();
     await brief(agent, id.Ada!); // Ada opens the decision and reads it.
+    await afterTheVisit();
 
     await agent.postMessageFor(id.Grace!, "I'm with March now.");
     await agent.applyAnalysis({
@@ -421,6 +433,7 @@ describe("the current state brief", () => {
   it("is per participant — one person reading it does not move anyone else's boundary", async () => {
     const { agent, id } = await discussing();
     await brief(agent, id.Ada!);
+    await afterTheVisit();
     await agent.postMessageFor(id.Ada!, "One.");
     await agent.applyAnalysis({ ...SILENT, analyzedThroughSeq: 1 });
 
