@@ -1,6 +1,6 @@
 /**
  * One-command setup: validate credentials → generate types → build → deploy →
- * seed → print URLs.
+ * seed → print the participant links.
  *
  * Everything Cloudflare-side is provisioned declaratively by `wrangler deploy`
  * from wrangler.jsonc (Worker, both Durable Object namespaces with SQLite
@@ -8,9 +8,11 @@
  * dashboard steps.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
-const REQUIRED_ENV = ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"] as const;
+const REQUIRED_ENV = ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN", "SEED_TOKEN"] as const;
 
 /** Names of required variables that are missing or blank. Exported for tests. */
 export function missingEnv(
@@ -49,7 +51,8 @@ function main() {
     console.error(
       `✗ Missing required environment variable(s): ${missing.join(", ")}\n` +
         `  Copy .env.example to .env and fill them in, or export them in your shell.\n` +
-        `  See README ("Cloudflare API token permissions").`
+        `  SEED_TOKEN is yours to choose — generate one with \`openssl rand -hex 32\`.\n` +
+        `  See README ("Cloudflare API token permissions" and "Seeding a decision").`
     );
     process.exit(1);
   }
@@ -69,19 +72,51 @@ function main() {
       "  See README (\"Cloudflare API token permissions\")."
   );
 
-  // 3–5. Types, build, deploy.
+  // 3–5. Types, build, deploy. The operator token goes up with the deploy
+  //       rather than through `wrangler secret put`, because a Worker that
+  //       does not exist yet cannot be given a secret in advance — and this is
+  //       the same command on a first deploy and on the hundredth.
   run("Generating Worker types", "npx", ["wrangler", "types", "env.d.ts"]);
   run("Building client + Worker", "npm", ["run", "build"]);
-  const deployOutput = run("Deploying to Cloudflare", "npx", ["wrangler", "deploy"], true);
+  const deployOutput = withSecretsFile(process.env.SEED_TOKEN!, (path) =>
+    run("Deploying to Cloudflare", "npx", ["wrangler", "deploy", "--secrets-file", path], true)
+  );
 
-  // 6. Seed the demonstration scenario (implemented in M7; a no-op until then).
-  run("Seeding demonstration scenario", "node", ["scripts/seed.ts"]);
-
-  // 7. URLs.
+  // 6. Seed a decision into the deployment that was just made — by URL, over
+  //    HTTPS, through the same endpoint any operator would use.
   const url = parseDeployedUrl(deployOutput);
+  if (!url) {
+    console.error(
+      "\n✗ Deployed, but could not find the application URL in wrangler's output.\n" +
+        "  Seed it yourself once you have the URL:\n" +
+        "    npm run seed -- https://<your-worker>.workers.dev"
+    );
+    process.exit(1);
+  }
+  run("Seeding a decision", "node", ["scripts/seed.ts", url]);
+
   console.log("\n✓ Setup complete.");
-  console.log(url ? `  Application: ${url}` : "  Application: see the deploy output above for the URL.");
-  console.log("  Participant links for the seeded decision are printed by `npm run seed` (M7).");
+  console.log(`  Application: ${url}`);
+  console.log("  Open one of the participant links above — they are the only way in.");
+}
+
+/**
+ * Runs `body` with a file holding the Worker's secrets, and removes it however
+ * that goes.
+ *
+ * Wrangler wants secrets for a first deploy as a file; the token is already on
+ * this machine, so writing it to a private temporary directory for the length
+ * of one command adds no exposure that was not already there. It never lands
+ * in the repository, and it does not survive the deploy.
+ */
+function withSecretsFile<T>(seedToken: string, body: (path: string) => T): T {
+  const path = join(mkdtempSync(join(tmpdir(), "adf-secrets-")), "secrets.env");
+  writeFileSync(path, `SEED_TOKEN=${seedToken}\n`, { mode: 0o600 });
+  try {
+    return body(path);
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
 }
 
 // Guarded so the pure helpers above stay importable from tests.

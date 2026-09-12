@@ -8,10 +8,10 @@ import type { ClosedDecisionRecord } from "../../shared/types.ts";
  * There is no team-creation path — no sign-up, no workspace, nothing that
  * could hand out a second team id — so inventing team plumbing to support
  * closing would be building the container before anything can put something in
- * it. Every closed decision is written here. M7 introduces real team identity
- * alongside the seeding that will actually create teams; until then this
- * constant is the whole of it, named rather than spelled out at the call site
- * so there is one place for that to change.
+ * it. Every closed decision is written here. M7 gave the operator a way to
+ * create decisions, deliberately not teams: one implicit team is a documented
+ * MVP limitation rather than a gap. The constant is named rather than spelled
+ * out at the call site so there is one place for that to change.
  */
 export const DEFAULT_TEAM_ID = "default";
 

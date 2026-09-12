@@ -1,6 +1,7 @@
 import { getAgentByName, routeAgentRequest } from "agents";
 import type { FrameDecisionInput } from "./agents/decision.ts";
 import { DEFAULT_TEAM_ID } from "./agents/team.ts";
+import { bearerToken, matchesSecret } from "./auth/credentials.ts";
 import { DECISION_ID_PATTERN, sessionCookie } from "./auth/sessions.ts";
 
 export { DecisionAgent } from "./agents/decision.ts";
@@ -24,28 +25,30 @@ export default {
     // deliberately so: the Team Agent has no participant or session model, so
     // nothing it holds may be exposed to a browser.
     //
-    // Guarded exactly the way `/d/new` is. `import.meta.env.DEV` is a
-    // build-time constant, so this branch is eliminated from the deployed
-    // Worker rather than merely refused there.
+    // `import.meta.env.DEV` is a build-time constant, so this branch is
+    // eliminated from the deployed Worker rather than merely refused there.
+    // It is the last route guarded that way: decision creation is no longer a
+    // development fixture but an authenticated operator endpoint, below.
     if (import.meta.env.DEV && root === "team" && decisionId === "history" && p) {
       const team = await getAgentByName(env.TeamAgent, DEFAULT_TEAM_ID);
       const record = await team.getClosedDecision(p);
       return record ? Response.json(record) : new Response("Not found", { status: 404 });
     }
 
+    // The operator's decision-creation path, and the whole of the
+    // administrative surface: one operation, no reads, no listing, no deletes.
+    //
+    // Deliberately not a product API. The plan (§4.1) rejects a public
+    // creation endpoint, so this one is for whoever deploys and seeds the
+    // application, authenticated by a Worker secret that no browser is ever
+    // given. What it creates is an ordinary decision — participants reach it
+    // through the same participant links, and nothing downstream knows it was
+    // created here rather than by a person.
+    if (root === "admin" && decisionId === "decisions" && !p && request.method === "POST") {
+      return createDecision(request, env, url);
+    }
+
     if (root === "d") {
-      // A development fixture, not a product API. The plan (§4.1) rejects a
-      // public decision-creation endpoint; M7 replaces this with seed tooling.
-      // It exists only so Submit → Reveal can be exercised in a browser during
-      // development — do not build anything on it.
-      //
-      // `import.meta.env.DEV` is a build-time constant, so this branch is not
-      // merely refused in a deployed Worker: it is eliminated from the bundle,
-      // and the path falls through to the SPA like any other unknown `/d/...`.
-      // `new` cannot collide with a decision id — those are UUIDs.
-      if (import.meta.env.DEV && decisionId === "new" && request.method === "POST") {
-        return frameDecision(request, env, url);
-      }
       if (decisionId && !DECISION_ID_PATTERN.test(decisionId)) {
         return new Response("Not found", { status: 404 });
       }
@@ -71,7 +74,27 @@ export default {
   }
 } satisfies ExportedHandler<Env>;
 
-async function frameDecision(request: Request, env: Env, url: URL): Promise<Response> {
+/**
+ * Creates one decision, for the operator who deployed the application.
+ *
+ * The bearer token is compared as a hash of itself, so the comparison takes
+ * the same time whatever is presented and a near-miss is worth no more than a
+ * wild guess. The token is never echoed, logged, or written anywhere: the only
+ * thing that leaves here is the decision and its participant links.
+ */
+async function createDecision(request: Request, env: Env, url: URL): Promise<Response> {
+  if (!env.SEED_TOKEN) {
+    // Distinguished from a refusal on purpose. An operator who has not set the
+    // secret has a configuration problem, and telling them so costs nothing —
+    // the endpoint is unusable either way until they do.
+    return new Response("Administrative decision creation is not configured on this deployment.", {
+      status: 503
+    });
+  }
+  if (!(await matchesSecret(bearerToken(request), env.SEED_TOKEN))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
   let input: FrameDecisionInput;
   try {
     input = (await request.json()) as FrameDecisionInput;
