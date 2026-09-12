@@ -476,8 +476,12 @@ loses it from their record. Selecting none is correct when none of them matter.
 
 DISSENT
 Disagreement that was still live when the decision was closed, one short line
-each, naming who held it. Only what the discussion and the final positions
-actually show. If the team had converged, this is empty.
+each. Name the participant who held it, spelling their name exactly as it
+appears under PARTICIPANTS, and if you name the option they were holding out
+for, it must be the one CURRENT POSITIONS shows them on. A line that names
+nobody, or that puts someone on an option they did not end on, is discarded.
+Only what the discussion and the final positions actually show. If the team had
+converged, this is empty.
 
 Reply with JSON only.`;
 

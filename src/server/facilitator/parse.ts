@@ -209,11 +209,14 @@ export function parseAnalysis(output: unknown, context: FacilitatorContext): Fac
  * the statement as the facilitator worded it, not as the model retyped it —
  * so the memo and the state it was written from cannot drift apart.
  *
- * `reasoning` and `dissent` are prose and cannot be checked that way.
- * `dissent` gets the one check there is: a team whose final positions agree
- * has no dissent to report, whatever the model wrote. `reasoning` gets none,
- * and the prompt is what stands behind it — which is worth being honest about
- * rather than pretending a length check is a grounding check.
+ * `dissent` has no list to copy from, so it is grounded against the final
+ * positions instead: the team must actually have ended up holding different
+ * options, each line must name someone holding one, and a line that puts a
+ * participant on an option they did not end up holding is dropped.
+ *
+ * `reasoning` gets none, and the prompt is what stands behind it — which is
+ * worth being honest about rather than pretending a length check is a
+ * grounding check.
  *
  * The outcome is never read from `value`. It is copied from the closed
  * decision, which is what makes it structurally impossible for a memo to
@@ -234,12 +237,7 @@ export function parseClosingMemo(output: unknown, context: FacilitatorContext): 
     reasoning: prose(value.reasoning, "reasoning"),
     refutedAssumptions: grounded(value.refutedAssumptions, known.refutedAssumptions, "refutedAssumptions"),
     unresolvedIssues: grounded(value.unresolvedIssues, known.unresolvedIssues, "unresolvedIssues"),
-    // Dissent has no canonical list to select from, so it is grounded in the
-    // one thing that can be checked: whether the team actually ended up
-    // holding different positions.
-    dissent: dissentingPositions(context.positions).length
-      ? lines(value.dissent, "dissent")
-      : [],
+    dissent: groundedDissent(value.dissent, context),
     actionItems: grounded(value.actionItems, known.actionItems, "actionItems")
   };
 }
@@ -269,6 +267,75 @@ function grounded(value: unknown, known: string[], at: string): string[] {
     kept.set(match, match);
   }
   return [...kept.values()];
+}
+
+/**
+ * Keeps only the dissent lines that the final state can support.
+ *
+ * Dissent is the one memo list with nothing to copy from — who still disagreed
+ * and about what is a reading of the discussion, not a row in the working
+ * model — so it is grounded against the positions the team actually ended on:
+ *
+ *   1. The team must be holding more than one option at all. A team that
+ *      converged has no dissent to report, whatever the model wrote.
+ *   2. Each line must name a participant who is holding one of them. A line
+ *      about somebody who is not in this decision is about nothing.
+ *   3. A line may not put a named participant on an option they did not end up
+ *      holding. "Marcus still preferred staying" is a fabrication when
+ *      Marcus's final position is to move — and an invented disagreement is
+ *      worse in the permanent record than a missing one, because the team
+ *      reads it in six months as something that happened.
+ *
+ * Only options somebody actually holds are checked in (3): an option nobody
+ * ended on is not a position in final state, and matching against it would
+ * turn a label like "Other" into a word the memo may not contain.
+ *
+ * Dropped rather than thrown, like every other grounding failure here: one
+ * unsupported line should cost the team that line, not the whole memo.
+ */
+function groundedDissent(value: unknown, context: FacilitatorContext): string[] {
+  const dissenting = dissentingPositions(context.positions);
+  if (!dissenting.length) return [];
+
+  const displayName = new Map(context.participants.map((p) => [p.id, p.displayName]));
+  const holders = dissenting.flatMap((p) => {
+    const name = displayName.get(p.participantId);
+    return name && p.optionId ? [{ name, optionId: p.optionId }] : [];
+  });
+  const heldOptions = context.decision.options.filter((o) =>
+    holders.some((h) => h.optionId === o.id)
+  );
+
+  const kept: string[] = [];
+  for (const line of lines(value, "dissent")) {
+    const named = holders.filter((h) => mentions(line, h.name));
+    const misattributed = heldOptions.filter(
+      (o) => mentions(line, o.label) && !named.some((h) => h.optionId === o.id)
+    );
+
+    if (!named.length || misattributed.length) {
+      // Worth a line: a dropped entry is a disagreement the model thought the
+      // record should carry, and its absence is otherwise unexplained.
+      console.log(
+        `dropped an ungrounded dissent entry (${
+          named.length ? "attributes a position they did not hold" : "names nobody holding a position"
+        }): ${line.slice(0, 120)}`
+      );
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept;
+}
+
+/**
+ * Whether a line refers to a name or a label, as a whole word: the model
+ * retypes both out of prose, so matching is case-insensitive, but "Ada" is not
+ * "Adam" and "Stay with Arcus" is not "Stayed with Arcus".
+ */
+function mentions(line: string, term: string): boolean {
+  const escaped = term.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "iu").test(line);
 }
 
 /** Free prose the model composed. Bounded, and required to be something. */

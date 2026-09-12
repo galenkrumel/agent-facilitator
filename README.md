@@ -351,9 +351,21 @@ assumptions, the open cruxes and conflicts, the commitments — and asks it to
 copy across the ones that belong in the record. Each string that comes back is
 matched against that set and dropped if it matches nothing, so the memo can
 lose an item but cannot gain one. The model's judgement is *which* of them
-mattered; that judgement is why it is asked at all. `reasoning` and `dissent`
-are prose, and `dissent` gets the one check available to it: a team whose final
-positions agreed has no dissent to report, whatever the model wrote.
+mattered; that judgement is why it is asked at all.
+
+`dissent` has no list to copy from — who still disagreed is a reading of the
+discussion, not a row in the working model — so it is grounded against the
+final positions instead. A team whose positions agreed has no dissent to
+report, whatever the model wrote; each line must name a participant who is
+holding one of the positions the team split across; and a line that puts a
+named participant on an option they did not end up holding is dropped, because
+an invented disagreement in the permanent record is worse than a missing one.
+Only options somebody actually holds are checked, so a label like "Other" that
+nobody ended on does not become a word the memo may not contain.
+
+`reasoning` is the one field with no grounding. The prompt is what stands
+behind it, which is worth saying plainly rather than pretending a length check
+is a grounding check.
 
 One function builds the known lists for both the prompt and the validator, so
 the model is never asked for something it would then be penalised for giving.

@@ -420,11 +420,20 @@ describe("parsing the closing memo", () => {
   });
 
   /**
-   * Dissent has no canonical list to select from, so it is grounded in the one
-   * thing that can be checked: whether the team actually ended up disagreeing.
+   * Dissent has no list to copy from, so it is grounded against the final
+   * positions: the team must have ended up disagreeing, each line must name
+   * somebody who is holding one of those positions, and nobody may be put on
+   * an option they did not end on. Priya and Dana end on "Stay with Arcus for
+   * another year" (opt-2, the outcome); Marcus ends on "Move to Northwind
+   * before Q3" (opt-1), and is therefore the one still dissenting.
    */
   it("keeps dissent when the final positions differ", () => {
     expect(parse(memo()).dissent).toHaveLength(1);
+  });
+
+  it("keeps a line that names the position its participant actually holds", () => {
+    const grounded = ["Marcus still preferred Move to Northwind before Q3, at confidence 4."];
+    expect(parse(memo({ dissent: grounded })).dissent).toEqual(grounded);
   });
 
   it("drops dissent entirely when the team converged", () => {
@@ -433,6 +442,38 @@ describe("parsing the closing memo", () => {
       positions: CLOSED.positions.map((p) => ({ ...p, optionId: "opt-2" }))
     };
     expect(parse(memo(), converged).dissent).toEqual([]);
+  });
+
+  /** Nobody to ask about it, and nobody it can be reported back to. */
+  it("drops a dissent line attributed to someone who is not in this decision", () => {
+    const invented = ["Sam still holds that the migration is the cheaper risk."];
+    expect(parse(memo({ dissent: invented })).dissent).toEqual([]);
+  });
+
+  /** Marcus ends on opt-1. A memo saying otherwise invents a disagreement. */
+  it("drops a dissent line that puts a participant on a position they did not hold", () => {
+    const misattributed = [
+      "Marcus still holds that Stay with Arcus for another year is the safer bet."
+    ];
+    expect(parse(memo({ dissent: misattributed })).dissent).toEqual([]);
+  });
+
+  it("keeps the grounded lines and drops only the unsupported ones", () => {
+    const mixed = [
+      "Marcus still holds that the fee difference outweighs the migration cost.",
+      "Sam never came round to it."
+    ];
+    expect(parse(memo({ dissent: mixed })).dissent).toEqual([mixed[0]]);
+  });
+
+  /**
+   * "Other" is an option nobody ended on, so it is not a position in final
+   * state and not something a line can be checked against — otherwise the word
+   * itself would be unsayable in a memo.
+   */
+  it("does not read an option nobody holds as a misattributed position", () => {
+    const prose = ["Marcus and Priya each priced the delay against the other."];
+    expect(parse(memo({ dissent: prose })).dissent).toEqual(prose);
   });
 
   it("refuses a memo with no reasoning at all", () => {
