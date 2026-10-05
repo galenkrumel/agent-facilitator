@@ -5,7 +5,7 @@ discusses openly. A neutral AI facilitator helps the team surface conflicting
 assumptions — it does not make the decision, recommend an option, or coach
 participants.
 
-> **Implementation status: M6 (closing, decision outcome & history).**
+> **Implementation status: M7 (seeded demonstration & decision creation).**
 > The deployment path is in place (M0) and a decision can be framed and opened
 > through a participant link (M1). A participant submits a private initial
 > position, and the decision reveals — automatically once everyone has
@@ -18,12 +18,14 @@ participants.
 > participant-facing board, applies the position changes participants state
 > explicitly, asks for a confidence a change did not carry, holds back an
 > intervention on an issue nothing has happened to, and writes each participant
-> a Current State Brief on opening (M5). The owner can now declare an outcome
-> and close the decision, after which it is read-only: the facilitator writes a
+> a Current State Brief on opening (M5). The owner can declare an outcome and
+> close the decision, after which it is read-only: the facilitator writes a
 > closing memo around the outcome without being able to change it, and the
-> closed decision is filed in the Team Agent's history (M6). Seeded demo
-> creation and the full documentation required by M8 are M7–M8; the latter
-> replaces this file's later sections.
+> closed decision is filed in the Team Agent's history (M6). A decision is now
+> created by the operator who deployed the application, through one
+> authenticated endpoint, and can be created with a history already in it — a
+> deployment is seeded with a real discussion already under way (M7). The full
+> documentation required by M8 replaces this file's later sections.
 
 ## Architecture (as configured)
 
@@ -40,19 +42,17 @@ Everything above is declared in `wrangler.jsonc` and provisioned by
 `wrangler deploy`. There are no manual dashboard steps and no REST
 provisioning.
 
-## Framing a decision and opening it
+## Creating a decision, and opening it
 
-Framing is **not a product capability.** There is no user-facing way to create
-a decision, and `POST /d/new` is a *development fixture only*: the branch is
-compiled out of the deployed Worker, so on a deployed instance that path falls
-through to the SPA like any other unknown URL. It exists so the lifecycle can
-be exercised locally until the seeded scenario replaces it in M7. Do not build
-on it.
-
-Against the dev server:
+Creating a decision is **not a product capability.** There is no user-facing
+way to create one: no sign-up, no "new decision" button, nothing a participant
+can reach. A decision is created by whoever deploys the application, through
+the single administrative endpoint, and everyone else arrives by participant
+link.
 
 ```bash
-curl -X POST http://localhost:5173/d/new \
+curl -X POST https://<your-worker>.workers.dev/admin/decisions \
+  -H "Authorization: Bearer $SEED_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"question":"Ship in February or slip to March?",
        "context":"Two weeks of runway left.",
@@ -60,25 +60,69 @@ curl -X POST http://localhost:5173/d/new \
        "participants":["Ada","Grace"]}'
 ```
 
-It returns one participant link per person — the first is the owner — and the
-application adds the **Other** option itself. The links are shown **once**:
-only their hashes are stored.
+`SEED_TOKEN` is a Worker secret — one you generate (`openssl rand -hex 32`),
+set in `.env`, and which `npm run setup` uploads with the deploy. It is never
+given to a participant, never sent to a browser, and never written into the
+repository. Without it the endpoint answers `401`; on a deployment that was
+never given one, `503`.
 
-Opening a link:
+That is the whole administrative surface: **one creation operation.** No
+listing, no reads, no deletes, no admin UI. Everything else about a decision
+happens inside the Decision Agent, through an authenticated participant
+session.
 
-```text
-GET /d/:decisionId/p/:credential   Decision Agent validates the credential,
-                                   mints a session, sets an HttpOnly cookie
-      ↓ 303
-GET /d/:decisionId                 SPA shell; the credential is out of the URL
-      ↓
-WS  /agents/decision-agent/:id     Decision Agent authenticates the cookie,
-                                   then serves getBootstrap() from SQLite
+The response is one participant link per person — the first named is the
+owner — and the application adds the **Other** option itself. The links are
+shown **once**: only their hashes are stored, so a link that is lost is lost.
+
+### Creating a decision that has already been going on
+
+The same endpoint accepts the history a decision is framed as already having:
+`submissions` and backdated `messages`, indexed into the `participants` and
+`options` it was just given.
+
+```jsonc
+{
+  "question": "...", "options": ["...", "..."], "participants": ["Ada", "Grace"],
+  "submissions": [{ "participant": 0, "option": 0, "confidence": 4, "reasons": ["..."] }],
+  "messages":    [{ "participant": 1, "minutesAgo": 2880, "body": "..." }]
+}
 ```
 
-The credential stays reusable: opening the same link again — another browser,
-another device, later — mints another session for the same participant. A
-connection without a valid session is closed, not served.
+What comes out is an ordinary decision in `DISCUSS`: the Reveal is the same
+Reveal, the transcript is the same transcript, and the facilitator then reads
+it exactly as it reads any other discussion. **There is no demo mode.** Nothing
+in the application knows or can ask whether a decision was created this way —
+the facilitator state a seeded scenario has is state the real facilitator
+derived from the real discussion, not a fixture.
+
+History that could not have happened is refused before anything is written: an
+index naming nobody, a participant submitting twice, a message posted a
+negative number of minutes ago, a body that fails the same validation a live
+message does. Messages are stored oldest-first whatever order they were listed
+in, so `seq` and the clock agree.
+
+### Seeding a deployment
+
+`npm run seed` is that endpoint with a scenario already written:
+
+```bash
+npm run seed -- https://<your-worker>.workers.dev   # or http://localhost:5173
+```
+
+The target is an argument rather than a default, because seeding writes real
+state. It prints the participant links, once. Each run creates a **new**
+decision — credentials cannot be re-derived from their hashes, so there is no
+way to re-print an earlier run's links, and seeding twice gives you a second
+decision rather than a second copy of the first.
+
+The scenario (`scripts/seed.ts`) is a decision two days into Discuss: three
+people invited, two who submitted and disagree, ten backdated messages, and a
+disagreement resting on something neither of them has said out loud. The third
+participant has never opened their link — so opening it is a **first visit**,
+and what they get is a Current State Brief of an argument already in progress.
+
+### Opening a link
 
 ## Submit and Reveal
 
@@ -402,8 +446,10 @@ participant or session model, so nothing it holds may reach a browser.
 
 The MVP has one implicit team, addressed by the constant `DEFAULT_TEAM_ID`.
 There is no team-creation path yet, so inventing team plumbing to support
-closing would be building the container before anything can fill it; M7
-introduces real team identity alongside the seeding that will create teams.
+closing would be building the container before anything can fill it. It stays
+one implicit team: M7 introduced decision creation, not team creation, and the
+single-team limitation is a documented MVP limitation rather than a gap M7
+closed.
 
 ## Model evaluation
 
@@ -464,6 +510,7 @@ a second participant:
 
 ```bash
 npm run dev                                     # in another terminal
+npm run seed -- http://localhost:5173           # or, for an empty decision:
 node scripts/verify.ts frame "…" "Ada,Grace" "Option A,Option B"
 node scripts/verify.ts submit <link> opt-2 3 "…"
 node scripts/verify.ts say    <link> "…"        # posts, waits for the facilitator
@@ -485,13 +532,23 @@ follow-up, selectivity, refresh, the returning brief, and then the close: the
 advisory, the declared outcome, the memo landing on the other participant's
 screen without a refresh, and the closed decision refusing everything.
 
-`history` reads the Team Agent back over the wire through a development-only
-route, guarded by `import.meta.env.DEV` exactly as `/d/new` is — so it is
-eliminated from the deployed Worker rather than merely refused there. It is
-verification infrastructure, not a product API.
+`frame` creates its decision through `POST /admin/decisions`, so it needs
+`SEED_TOKEN` — it is read from `.env`. Every other command works from a
+participant link alone, including links printed by `npm run seed`, because a
+link carries its own origin. `VERIFY_ORIGIN` points `frame` and `history` at a
+deployment instead of the dev server:
 
-It needs `npm run dev`, because `/d/new` exists only in development; a deployed
-instance has no way to create a decision until M7 seeds one.
+```bash
+VERIFY_ORIGIN=https://<your-worker>.workers.dev node scripts/verify.ts frame …
+```
+
+`history` is the exception that stays local. It reads the Team Agent back over
+the wire through a development-only route, guarded by `import.meta.env.DEV` —
+eliminated from the deployed Worker rather than merely refused there. It is
+verification infrastructure, not a product API, and the Team Agent has no
+participant or session model to expose one safely. On a deployed instance the
+closing memo reaching `READY` is the observable signal; the history write is
+the same Workflow step.
 
 Two defects were found this way and neither was visible to the tests: the
 intervention gate did not close in a live discussion (above), and a position
@@ -509,13 +566,18 @@ fixed, and both now have a test.
 
 ```bash
 npm install
-cp .env.example .env    # add CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN
+cp .env.example .env    # CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, SEED_TOKEN
 npm run setup
 ```
 
+`SEED_TOKEN` is yours to choose — `openssl rand -hex 32`. It is the operator
+token for `POST /admin/decisions`; see "Creating a decision, and opening it".
+
 `npm run setup` validates the credentials, generates Worker types, builds,
-deploys, seeds the demonstration scenario (from M7) and prints the application
-URL.
+deploys — uploading `SEED_TOKEN` as a Worker secret with the deploy, because a
+Worker that does not exist yet cannot be given a secret in advance — then seeds
+a decision into the deployment it just made and prints the participant links
+and the application URL.
 
 ## Cloudflare API token permissions
 
@@ -582,8 +644,8 @@ token.
 | `npm run dev` | Local dev server (Vite + Miniflare) |
 | `npm run build` | Build client and Worker |
 | `npm run deploy` | Build and deploy |
-| `npm run setup` | Validate → types → build → deploy → seed → print URLs |
-| `npm run seed` | Seed the demonstration scenario (M7) |
+| `npm run setup` | Validate → types → build → deploy → seed → print links |
+| `npm run seed` | `npm run seed -- <origin>` — seed a decision into that deployment |
 | `npm test` | Tests — both projects |
 | `npm run test:unit` | Pure domain and script tests, in Node |
 | `npm run test:agents` | Agent tests, in the real Workers runtime |
@@ -656,3 +718,10 @@ sessions are persisted, so the stored state yields no working links; the
 credential is exchanged once for an `HttpOnly` session cookie and then leaves
 the address bar; and the cookie is scoped per decision, so one browser can hold
 sessions for several decisions — as a different participant in each.
+
+`SEED_TOKEN` is a bearer credential too, and a stronger one: it creates
+decisions. It is a Worker secret, is compared as a hash of itself so a near-miss
+costs an attacker no more than a wild guess, and is never logged, echoed, or
+sent to a browser. Treat it the way you would a deploy key. Nothing it protects
+is readable — the administrative surface is one creation operation, with no way
+to list, read, or delete anything.

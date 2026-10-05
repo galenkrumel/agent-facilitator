@@ -12,6 +12,7 @@
   // Static assets. `run_worker_first` keeps Worker-owned routes from being
   // swallowed by the SPA fallback:
   //   /agents/* — Agents SDK RPC + realtime transport
+  //   /admin/*  — the operator's decision-creation endpoint, M7
   //   /d/*      — participant links (/d/:decisionId/p/:credential), M1
   //   /team/*   — the development-only team history read, M6. The route is
   //               eliminated from the deployed Worker by `import.meta.env.DEV`;
@@ -22,7 +23,7 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*", "/d/*", "/team/*"]
+    "run_worker_first": ["/agents/*", "/admin/*", "/d/*", "/team/*"]
   },
 
   // Both agents are SQLite-backed Durable Objects. The Decision Agent is the
@@ -51,10 +52,12 @@
     }
   ],
 
-  // This Worker requires no secrets. Declaring that explicitly stops Wrangler
-  // from loading .env into the Worker's env — .env here holds only Cloudflare
-  // CLI credentials, which must never become Worker bindings.
-  "secrets": { "required": [] },
+  // The one secret this Worker has: the operator's bearer token for
+  // POST /admin/decisions. Declaring the list explicitly is also what stops
+  // Wrangler loading the rest of .env into the Worker's env — .env otherwise
+  // holds Cloudflare CLI credentials, which must never become Worker bindings.
+  // Only names listed here are bound, so that separation still holds.
+  "secrets": { "required": ["SEED_TOKEN"] },
 
   "observability": { "enabled": true }
 }
