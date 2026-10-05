@@ -112,10 +112,15 @@ function main() {
 function withSecretsFile<T>(seedToken: string, body: (path: string) => T): T {
   const path = join(mkdtempSync(join(tmpdir(), "adf-secrets-")), "secrets.env");
   writeFileSync(path, `SEED_TOKEN=${seedToken}\n`, { mode: 0o600 });
+  // `run()` ends the process on a failed command, and `process.exit()` skips
+  // `finally` — so the exit handler is what removes the file in that case.
+  const remove = () => rmSync(dirname(path), { recursive: true, force: true });
+  process.once("exit", remove);
   try {
     return body(path);
   } finally {
-    rmSync(dirname(path), { recursive: true, force: true });
+    process.off("exit", remove);
+    remove();
   }
 }
 

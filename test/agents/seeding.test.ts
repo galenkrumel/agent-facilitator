@@ -178,6 +178,29 @@ describe("a decision framed as already having a history", () => {
     expect(scheduled).toHaveLength(0);
   });
 
+  it("reads the Reveal when the history has submissions but no discussion yet", async () => {
+    const { agent, scheduled } = await seeded({ ...SCENARIO, messages: [] });
+
+    expect((await agent.getFacilitatorContext()).decision.status).toBe("DISCUSS");
+    expect(scheduled.map((s) => s.params.type)).toEqual(["REVEAL"]);
+  });
+
+  it("resolves indices against the lists as they were supplied, blanks included", async () => {
+    const { agent, framed } = await seeded({
+      question: "Which way?",
+      options: ["Left", "  ", "Right"],
+      participants: ["Ada", "", "Grace"],
+      submissions: [{ participant: 2, option: 2, confidence: 4, reasons: ["it is shorter"] }],
+      messages: []
+    } as unknown as typeof SCENARIO);
+    const grace = framed.find((p) => p.displayName === "Grace")!;
+    const options = (await agent.getFacilitatorContext()).decision.options;
+    const [held] = await positions(agent);
+
+    expect(held).toMatchObject({ participantId: grace.id });
+    expect(options.find((o) => o.id === held!.optionId)?.label).toBe("Right");
+  });
+
   it("refuses history that could not have happened", async () => {
     const agent = (await getAgentByName(env.DecisionAgent, crypto.randomUUID())) as Agent;
     const broken = (input: Partial<typeof SCENARIO>) =>
@@ -200,6 +223,21 @@ describe("a decision framed as already having a history", () => {
         ]
       })
     ).toMatch(/more than one initial submission/);
+    // `"0"` names the same participant as `0`; as JSON it would have slipped
+    // past the duplicate check and failed on the primary key part-way through.
+    expect(
+      await broken({
+        submissions: [
+          { participant: 0, option: 0, confidence: 3, reasons: [] },
+          { participant: "0" as unknown as number, option: 1, confidence: 3, reasons: [] }
+        ]
+      })
+    ).toMatch(/no participant 0/);
+    // One past the caller's options is the `Other` the application appended.
+    const other = SCENARIO.options.length;
+    expect(await broken({ submissions: [{ participant: 0, option: other, confidence: 3, reasons: [] }] })).toMatch(
+      new RegExp(`no option ${other}`)
+    );
     expect(await broken({ messages: [{ participant: 9, body: "hello", minutesAgo: 1 }] })).toMatch(
       /no participant 9/
     );

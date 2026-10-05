@@ -57,9 +57,10 @@ export type FrameDecisionInput = {
    * that transcript like any other. Nothing downstream can tell the
    * difference, because there is no difference to tell.
    *
-   * Indices into `participants` and `options`, because the caller is naming
-   * people and options it has just supplied and does not know the ids this
-   * call is about to mint.
+   * Indices into `participants` and `options` as supplied, because the caller
+   * is naming people and options it has just supplied and does not know the
+   * ids this call is about to mint. The `Other` option the application adds is
+   * not one of them, so it cannot be indexed.
    */
   submissions?: SeededSubmission[];
   messages?: SeededMessage[];
@@ -184,9 +185,11 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
   async frameDecision(input: FrameDecisionInput): Promise<FramedParticipant[]> {
     if (this.decisionRow()) throw new Error("decision already framed");
 
-    const labels = input.options.map((o) => o.trim()).filter(Boolean);
+    const givenOptions = input.options.map((o) => o.trim());
+    const labels = givenOptions.filter(Boolean);
     if (labels.length < 2 || labels.length > 4) throw new Error("a decision needs 2–4 options");
-    const names = input.participants.map((p) => p.trim()).filter(Boolean);
+    const givenNames = input.participants.map((p) => p.trim());
+    const names = givenNames.filter(Boolean);
     if (names.length === 0) throw new Error("a decision needs an owner");
     if (!input.question.trim()) throw new Error("a decision needs a question");
 
@@ -199,15 +202,16 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
     // rules a live submission or message goes through. State that could not
     // have arisen legitimately is not pre-existing state, it is forged state.
     const submissions = (input.submissions ?? []).map((s) => {
-      if (!names[s.participant]) throw new Error(`there is no participant ${s.participant}`);
-      const option = options[s.option];
-      if (!option) throw new Error(`there is no option ${s.option}`);
+      const participant = keptIndex(givenNames, s.participant);
+      if (participant === undefined) throw new Error(`there is no participant ${s.participant}`);
+      const option = keptIndex(givenOptions, s.option);
+      if (option === undefined) throw new Error(`there is no option ${s.option}`);
       const validated = validateSubmission(options, {
-        optionId: option.id,
+        optionId: options[option]!.id,
         confidence: s.confidence,
         reasons: s.reasons
       });
-      return { participant: s.participant, ...validated };
+      return { participant, ...validated };
     });
     if (new Set(submissions.map((s) => s.participant)).size !== submissions.length) {
       throw new Error("a participant has more than one initial submission");
@@ -216,11 +220,12 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
     // to agree with the clock rather than with the order they were listed in.
     const messages = (input.messages ?? [])
       .map((m) => {
-        if (!names[m.participant]) throw new Error(`there is no participant ${m.participant}`);
+        const participant = keptIndex(givenNames, m.participant);
+        if (participant === undefined) throw new Error(`there is no participant ${m.participant}`);
         if (!Number.isFinite(m.minutesAgo) || m.minutesAgo < 0) {
           throw new Error("a message was posted a negative number of minutes ago");
         }
-        return { participant: m.participant, body: validateMessageBody(m.body), minutesAgo: m.minutesAgo };
+        return { participant, body: validateMessageBody(m.body), minutesAgo: m.minutesAgo };
       })
       .sort((a, b) => b.minutesAgo - a.minutesAgo);
 
@@ -240,24 +245,28 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
     // from reading as a two-day-old discussion on a decision created seconds
     // ago — the one detail that would give it away as manufactured.
     const framedAt = messages.length ? now - messages[0]!.minutesAgo * 60_000 - 60_000 : now;
-    this.sql`
-      INSERT INTO decisions (id, question, context, options, status, owner_participant_id, created_at)
-      VALUES (${this.name}, ${input.question.trim()}, ${input.context?.trim() || null},
-              ${JSON.stringify(options)}, ${"SUBMIT"}, ${framed[0]!.id}, ${framedAt})
-    `;
-    framed.forEach((p, i) => {
+    const revealed = submissions.length > 0 || messages.length > 0;
+    // One transaction: validation above cannot anticipate every constraint, and
+    // a throw part-way through must not leave a half-framed decision behind.
+    this.ctx.storage.transactionSync(() => {
       this.sql`
-        INSERT INTO participants (id, display_name, credential_hash, is_owner, created_at)
-        VALUES (${p.id}, ${p.displayName}, ${hashes[i]!}, ${p.isOwner ? 1 : 0}, ${framedAt})
+        INSERT INTO decisions (id, question, context, options, status, owner_participant_id, created_at)
+        VALUES (${this.name}, ${input.question.trim()}, ${input.context?.trim() || null},
+                ${JSON.stringify(options)}, ${"SUBMIT"}, ${framed[0]!.id}, ${framedAt})
       `;
-    });
-    this.sql`INSERT INTO facilitator_meta (id) VALUES (1)`;
+      framed.forEach((p, i) => {
+        this.sql`
+          INSERT INTO participants (id, display_name, credential_hash, is_owner, created_at)
+          VALUES (${p.id}, ${p.displayName}, ${hashes[i]!}, ${p.isOwner ? 1 : 0}, ${framedAt})
+        `;
+      });
+      this.sql`INSERT INTO facilitator_meta (id) VALUES (1)`;
 
-    // Then everything that had already happened. Reveal goes through
-    // `revealDecision` like every other Reveal — a participant who was invited
-    // and never submitted simply has no position, exactly as when an owner
-    // declares submissions complete without them.
-    if (submissions.length || messages.length) {
+      // Then everything that had already happened. Reveal goes through
+      // `revealDecision` like every other Reveal — a participant who was invited
+      // and never submitted simply has no position, exactly as when an owner
+      // declares submissions complete without them.
+      if (!revealed) return;
       submissions.forEach((s) => {
         this.sql`
           INSERT INTO initial_submissions (participant_id, option_id, confidence, reasons, submitted_at)
@@ -272,14 +281,16 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
           VALUES (${framed[m.participant]!.id}, ${m.body}, ${now - m.minutesAgo * 60_000})
         `;
       });
-    }
+    });
 
     this.publishProjection();
     // The facilitator is handed a committed transcript and reads it, exactly as
     // it would after any other message. Nothing about the seeded scenario's
     // facilitator state is scripted: it is whatever the real facilitator makes
-    // of the real discussion.
+    // of the real discussion. With no discussion yet, it reads the Reveal, as
+    // after every other Reveal.
     if (messages.length) await this.scheduleAnalysis("DISCUSSION");
+    else if (revealed) await this.scheduleAnalysis("REVEAL");
     return framed;
   }
 
@@ -1527,6 +1538,22 @@ export class DecisionAgent extends Agent<Env, DecisionRealtimeState> {
 function facilitatorStatus(meta: FacilitatorMetaRow | undefined): FacilitatorStatus {
   if (meta?.analysis_running) return "ANALYZING";
   return meta?.last_error ? "ERROR" : "IDLE";
+}
+
+/**
+ * Resolves a caller's index into `given` — its array as supplied, blanks and
+ * all — to that entry's position once blanks are dropped, or undefined when it
+ * names nothing. An index into `options` therefore never reaches the `Other`
+ * the application appends: that option is not one the caller supplied.
+ *
+ * Integers only. JSON lets `"0"` through, and a string that happens to index
+ * the same entry would slip past a duplicate check made on the raw values.
+ */
+function keptIndex(given: string[], index: unknown): number | undefined {
+  if (!Number.isInteger(index)) return undefined;
+  const i = index as number;
+  if (i < 0 || !given[i]) return undefined;
+  return given.slice(0, i).filter(Boolean).length;
 }
 
 /**
