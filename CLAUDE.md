@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Work is organised as milestones M0–M8. **M0 (Cloudflare-as-code setup), M1 (application spine), M2 (decision lifecycle), M3 (discussion + realtime), M4 (facilitator foundation), M5 (decision intelligence) and M6 (close + team history) are complete** — the rest of `src/` is a deployable stub with a comment naming the milestone that fills it in. M7 (seeded demonstration) is next.
 
-The canonical plan is **Revision 1.7**, which the user holds outside the repo; `docs/implementation-plan.md` is still Revision 1.6 and does not describe M6 as built.
+The plan lives in the repo: `docs/implementation-plan.md` (Revision 1.8) is the only copy and describes M0–M6 as built. When a milestone changes the plan, revise that file in the same branch — do not keep a plan revision outside the repo.
 
 Before implementing any milestone, read `docs/requirements.md` (what the product must do) and `docs/implementation-plan.md` (how the repo gets there). They are the authority; `README.md` describes only what is built so far.
 

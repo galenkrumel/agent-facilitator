@@ -1,5 +1,5 @@
 # Async Decision Facilitator
-## Repo-Level Implementation Plan — Revision 1.6
+## Repo-Level Implementation Plan — Revision 1.8
 
 ## Revision History
 
@@ -12,6 +12,8 @@
 | **1.4** | Incorporated M2 implementation findings: `/d/new` is development-only and eliminated from production bundles; absence of a `current_positions` row represents no current position; revealed initial submissions are exposed through bootstrap after Reveal; Workers-runtime and transport-level verification are complete; M3 owns realtime and M8 owns visual/E2E verification |
 | **1.5** | Incorporated M3 implementation findings: realtime state remains a non-authoritative projection; client-originated Agent state must be validated and cannot override SQLite; projection updates are followed by authoritative reads; M3 discussion/realtime implementation is complete |
 | **1.6** | Incorporated M4 model evaluation and facilitator findings: Llama 3.3 failed the required evaluation and was replaced by `gpt-oss-120b`; the facilitator now persistently applies validated AI state; M5 explicitly owns meaningful intervention selectivity; evaluation rubric revisions must remain part of the development record |
+| **1.7** | Accepted M5 and defined M6 in detail. This revision was kept outside the repository; M6 was built against it, and 1.8 records what that produced |
+| **1.8** | Incorporated M5 and M6 implementation findings: the intervention gate compares an issue key and a material state digest; unchanged facilitator state keeps its timestamp; reading the Current State Brief is the visit; the closing memo's outcome is copied, never model-supplied; memo list fields are selections grounded in facilitator state; dissent is grounded against final positions; closing synthesis does not share the analysis slot; team history is written only from a completed memo. M5 and M6 are complete; M7 is next |
 
 ---
 
@@ -269,7 +271,7 @@ Known limitations
 
 ---
 
-# 4. Settled Decisions from M1–M4
+# 4. Settled Decisions from M1–M6
 
 ## 4.1 Decision creation is not currently a public product capability
 
@@ -435,6 +437,8 @@ Structured output: valid across evaluated runs
 
 The selected model should remain the default unless later implementation evidence demonstrates a material problem.
 
+The facilitator's `max_tokens` is 8192. M5's wider response was truncated mid-array at 4096, and a truncated response is invalid JSON rather than a short answer. If the response schema grows again, re-run the evaluation and check structured-output validity first.
+
 Do not repeatedly re-run expensive model selection exercises without new evidence.
 
 ---
@@ -482,6 +486,97 @@ The goal is to measure substantive facilitator behavior rather than keyword over
 
 ---
 
+## 4.11 The intervention gate compares material state, not wording
+
+An intervention is identified by an issue key plus a digest of the decision's material facilitator state:
+
+- cruxes
+- conflicts
+- current positions
+- assumptions whose status is not `OPEN`
+
+An issue already raised may be raised again only when that digest has changed.
+
+Open assumptions are excluded on purpose. The facilitator adds one on almost every message, so including them moved the digest on every analysis and the gate never closed.
+
+The digest is decision-wide, not per-issue. A material change anywhere can reopen any issue. This ceiling is accepted for the MVP and documented in the README.
+
+---
+
+## 4.12 Unchanged facilitator state keeps its timestamp
+
+Every analysis rewrites the whole facilitator model.
+
+A row that survives an analysis unchanged keeps its previous timestamp. Stamping every row with the current time would make everything look freshly changed: the Current State Brief would report phantom changes and the intervention gate would reopen.
+
+---
+
+## 4.13 Position changes stated in a participant's own words count
+
+Only explicit position changes are applied (M5).
+
+"Explicit" means the participant states the change, in whatever words they use. It does not require a particular phrasing or UI action. End-to-end verification found that changes stated in a participant's own words were being ignored; they are now applied.
+
+Inferred changes, and changes in reasoning alone, are never applied.
+
+---
+
+## 4.14 Reading the Current State Brief is the visit
+
+`getCurrentStateBrief()` records `last_visited_at` when it is read.
+
+The client reads it once per opening and never on a realtime update. Re-reading it on every projection change would reset the participant's own "since your last visit" boundary to seconds ago.
+
+The boundary is strict: only items created after the last visit count as new.
+
+---
+
+## 4.15 The owner closes with an option; the facilitator cannot change it
+
+`closeDecision(outcomeOptionId)` takes one of the decision's options. The close transaction verifies owner, `DISCUSS`, and a valid option.
+
+Before closing, the owner can read a closing advisory (unresolved cruxes and similar). It is a separate read with no path into the close transaction, so it can warn but never delay or refuse a close.
+
+The closing memo's outcome is copied from the closed decision. The closing JSON schema has no outcome field, so the model cannot supply one.
+
+### Rejected decision
+
+Do not add a model-supplied outcome field "for validation." A field that does not exist is a stronger guarantee than a field that is checked.
+
+---
+
+## 4.16 Closing memo grounding
+
+- **List fields are selections, not compositions.** The prompt gives the model the exact statements in facilitator state, and the validator drops anything that is not one of them. One function, `closingKnownState()`, builds that set for both the prompt and the validator.
+- **Dissent is grounded per line against final positions.** A line that names nobody holding a position, or that puts a participant on an option they did not end on, is dropped.
+- **Free-form prose is grounded by the prompt only.** The memo's reasoning and the facilitator's intervention text cannot be checked deterministically. This is an accepted MVP limitation, documented in the README.
+
+### Rejected decision
+
+Do not validate prose with a second model call. A second model judging the first is another untrusted output in the same position, not validation.
+
+---
+
+## 4.17 Closing is independent of discussion analysis
+
+A discussion analysis can still be running when the owner closes.
+
+- Closing synthesis does not claim the analysis slot. The memo row's own status is what makes it run once.
+- Once the decision is not `DISCUSS`, `applyAnalysis()` refuses everything. A closed decision is frozen, and the memo is written from what was committed before the close.
+- `failAnalysis()` schedules no follow-up after close.
+
+---
+
+## 4.18 Team history is written from a completed memo
+
+The closing Workflow files the decision with the Team Agent only after the memo is applied. A record is not produced while the memo is pending or failed.
+
+Significant learnings are derived from authoritative facilitator state (assumptions with status `CHALLENGED` or `REFUTED`), not taken from the memo. The memo's refuted-assumption list is the model's selection from the same set; the two may legitimately differ.
+
+The `/team/history/:id` route is development-only verification infrastructure, guarded the same way as `/d/new`.
+
+---
+
 # 5. Milestone Overview
 
 | Milestone | Objective | Status |
@@ -491,9 +586,9 @@ The goal is to measure substantive facilitator behavior rather than keyword over
 | **M2** | Decision lifecycle | **Complete** |
 | **M3** | Discussion + realtime | **Complete** |
 | **M4** | Facilitator foundation | **Complete** |
-| **M5** | Decision intelligence | Next |
-| **M6** | Closing + history | Pending |
-| **M7** | Seeded demo | Pending |
+| **M5** | Decision intelligence | **Complete** |
+| **M6** | Closing + history | **Complete** |
+| **M7** | Seeded demo | Next |
 | **M8** | Hardening | Pending |
 
 ---
@@ -658,6 +753,8 @@ M4 is complete when:
 
 # 11. M5 — Decision Intelligence
 
+Complete. Implementation findings are recorded in §4.11–4.14.
+
 ## Objective
 
 Complete the facilitator's participant-facing intelligence while preserving neutrality and selectivity.
@@ -817,6 +914,8 @@ M5 is complete when:
 
 # 12. M6 — Close + Team History
 
+Complete. Implementation findings are recorded in §4.15–4.18.
+
 ## Objective
 
 Complete the decision lifecycle and persist institutional history.
@@ -826,9 +925,7 @@ Complete the decision lifecycle and persist institutional history.
 Implement:
 
 ```text
-closeDecision({
-  outcome
-})
+closeDecision(outcomeOptionId)
 ```
 
 Transaction:
@@ -895,6 +992,10 @@ Team Agent stores closed history only.
 - closing memo failure does not change the outcome
 - completed decision is stored in Team Agent history
 
+## Open item carried forward
+
+When closing synthesis fails after its retries, the decision stays closed with its outcome intact, but it never reaches Team Agent history, because a record is only produced from a completed memo (§4.18). The requirements do not say what history should hold in that case. M8 should decide whether to file the decision without a memo, offer a retry, or document the gap as a known limitation.
+
 ---
 
 # 13. M7 — Seeded Demonstration
@@ -922,6 +1023,8 @@ with:
 - meaningful disagreement
 
 ## Seed mechanism
+
+**Decide before implementing:** how seed tooling running on a developer's machine reaches the deployed Decision Agent without a public decision-creation endpoint. That choice affects the security model and must be settled in a plan revision first (§3).
 
 Provide an idempotent seed mechanism that can create the demonstration decision without exposing `/d/new` as a production API.
 
@@ -1212,6 +1315,18 @@ M4 Result / Findings
 Implementation Plan Revision 1.6
     ↓
 M5 Agent Prompt
+    ↓
+M5 Result / Findings
+    ↓
+Implementation Plan Revision 1.7
+    ↓
+M6 Agent Prompt
+    ↓
+M6 Result / Findings
+    ↓
+Implementation Plan Revision 1.8
+    ↓
+M7 Agent Prompt
     ↓
 ...
 ```
